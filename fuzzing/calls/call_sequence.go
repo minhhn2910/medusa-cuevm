@@ -3,8 +3,9 @@ package calls
 import (
 	"encoding/binary"
 	"fmt"
-	"github.com/crytic/medusa/chain"
 	"strconv"
+
+	"github.com/crytic/medusa/chain"
 
 	chainTypes "github.com/crytic/medusa/chain/types"
 	fuzzingTypes "github.com/crytic/medusa/fuzzing/contracts"
