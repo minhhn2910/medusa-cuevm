@@ -39,6 +39,9 @@ import (
 	fuzzingutils "github.com/crytic/medusa/fuzzing/utils"
 	"github.com/crytic/medusa/fuzzing/valuegeneration"
 	"github.com/crytic/medusa/utils"
+	"github.com/ethereum/go-ethereum/accounts/abi"
+	"github.com/ethereum/go-ethereum/common"
+	"golang.org/x/exp/maps"
 	"golang.org/x/exp/slices"
 )
 
@@ -664,110 +667,354 @@ func defaultShrinkingValueMutatorFunc(fuzzer *Fuzzer, valueSet *valuegeneration.
 // spawnWorkersLoop is a method which spawns a config-defined amount of FuzzerWorker to carry out the fuzzing campaign.
 // This function exits when Fuzzer.ctx is cancelled.
 func (f *Fuzzer) spawnWorkersLoop(baseTestChain *chain.TestChain) error {
-	// We create our fuzz workers in a loop, using a channel to block when we reach capacity.
-	// If we encounter any errors, we stop.
+	// Initialize workers array
 	f.workers = make([]*FuzzerWorker, f.config.Fuzzing.Workers)
-	threadReserveChannel := make(chan struct{}, f.config.Fuzzing.Workers)
 
-	// Workers are "reset" when they hit some config-defined limit. They are destroyed and recreated at the same index.
-	// For now, we create our available index queue before initializing some providers and entering our main loop.
-	type availableWorkerSlot struct {
-		index          int
-		randomProvider *rand.Rand
-	}
-	availableWorkerSlotQueue := make([]availableWorkerSlot, f.config.Fuzzing.Workers)
-	availableWorkerIndexedLock := sync.Mutex{}
-	for i := 0; i < len(availableWorkerSlotQueue); i++ {
-		availableWorkerSlotQueue[i] = availableWorkerSlot{
-			index:          i,
-			randomProvider: randomutils.ForkRandomProvider(f.randomProvider),
+	// Create all workers upfront
+	for i := 0; i < f.config.Fuzzing.Workers; i++ {
+		// Create a new worker for this fuzzing
+		randomProvider := randomutils.ForkRandomProvider(f.randomProvider)
+		worker, err := newFuzzerWorker(f, i, randomProvider)
+		if err != nil {
+			f.logger.Error("Failed to create worker", err)
+			return err
+		}
+
+		f.workers[i] = worker
+
+		// Publish an event indicating we created a worker
+		err = f.Events.WorkerCreated.Publish(FuzzerWorkerCreatedEvent{Worker: worker})
+		if err != nil {
+			f.logger.Error("Failed to publish worker created event", err)
+			return err
 		}
 	}
 
-	// Define a flag that indicates whether we have cancelled fuzzing or not
-	working := !utils.CheckContextDone(f.ctx)
+	// Main processing loop
+	working := true
+	for working && !utils.CheckContextDone(f.ctx) {
+		// Step 1: Prepare data in parallel
+		workersCancelled, err := f.prepareWorkersDataInParallel(baseTestChain)
+		if err != nil {
+			return err
+		}
+		if workersCancelled {
+			working = false
+			continue
+		}
 
-	// Create workers and start fuzzing.
-	var err error
-	for err == nil && working {
-		// Send an item into our channel to queue up a spot. This will block us if we hit capacity until a worker
-		// slot is freed up.
-		threadReserveChannel <- struct{}{}
+		// Step 2: Launch GPU kernel - focusing only on testNextCallSequence
+		err = f.launchGPUKernel()
+		if err != nil {
+			return err
+		}
 
-		// Pop a worker index off of our queue
-		availableWorkerIndexedLock.Lock()
-		workerSlotInfo := availableWorkerSlotQueue[0]
-		availableWorkerSlotQueue = availableWorkerSlotQueue[1:]
-		availableWorkerIndexedLock.Unlock()
-
-		// Run our goroutine. This should take our queued struct out of the channel once it's done,
-		// keeping us at our desired thread capacity. If we encounter an error, we store it and continue
-		// processing the cleanup logic to exit gracefully.
-		go func(workerSlotInfo availableWorkerSlot) {
-			// Create a new worker for this fuzzing.
-			worker, workerCreatedErr := newFuzzerWorker(f, workerSlotInfo.index, workerSlotInfo.randomProvider)
-			f.workers[workerSlotInfo.index] = worker
-			if err == nil && workerCreatedErr != nil {
-				err = workerCreatedErr
-			}
-			if err == nil {
-				// Publish an event indicating we created a worker.
-				workerCreatedErr = f.Events.WorkerCreated.Publish(FuzzerWorkerCreatedEvent{Worker: worker})
-				if err == nil && workerCreatedErr != nil {
-					err = workerCreatedErr
-				}
-			}
-
-			// Run the worker and check if we received a cancelled signal, or we encountered an error.
-			if err == nil {
-				ctxCancelled, workerErr := worker.run(baseTestChain)
-				if workerErr != nil {
-					err = workerErr
-				}
-
-				// If we received a cancelled signal, signal our exit from the working loop.
-				if working && ctxCancelled {
-					working = false
-				}
-			}
-
-			// Free our worker id before unblocking our channel, as a free one will be expected.
-			availableWorkerIndexedLock.Lock()
-			availableWorkerSlotQueue = append(availableWorkerSlotQueue, workerSlotInfo)
-			availableWorkerIndexedLock.Unlock()
-
-			// Publish an event indicating we destroyed a worker.
-			workerDestroyedErr := f.Events.WorkerDestroyed.Publish(FuzzerWorkerDestroyedEvent{Worker: worker})
-			if err == nil && workerDestroyedErr != nil {
-				err = workerDestroyedErr
-			}
-
-			// Unblock our channel by freeing our capacity of another item, making way for another worker.
-			<-threadReserveChannel
-		}(workerSlotInfo)
+		// Step 3: Process results in parallel
+		workersCancelled, err = f.processWorkersResultsInParallel()
+		if err != nil {
+			return err
+		}
+		if workersCancelled {
+			working = false
+		}
 	}
 
-	// Explicitly call cancel on our emergency context to ensure all threads exit if we encountered an error.
-	if err != nil {
-		f.Terminate()
+	// Clean up workers
+	for i := 0; i < len(f.workers); i++ {
+		worker := f.workers[i]
+		if worker != nil {
+			err := f.Events.WorkerDestroyed.Publish(FuzzerWorkerDestroyedEvent{Worker: worker})
+			if err != nil {
+				f.logger.Error("Failed to publish worker destroyed event", err)
+			}
+		}
 	}
 
-	// Wait for every worker to be freed, so we don't have a race condition when reporting the order
-	// of events to our test provider.
-	for {
-		// Obtain the count of free workers.
-		availableWorkerIndexedLock.Lock()
-		freeWorkers := len(availableWorkerSlotQueue)
-		availableWorkerIndexedLock.Unlock()
+	return nil
+}
 
-		// We keep waiting until every worker is free
-		if freeWorkers == len(f.workers) {
+// prepareWorkersDataInParallel handles all setup logic from run() in parallel
+// Returns a boolean indicating if workers should be cancelled and an error if one occurred
+func (f *Fuzzer) prepareWorkersDataInParallel(baseTestChain *chain.TestChain) (bool, error) {
+	var wg sync.WaitGroup
+	errChan := make(chan error, f.config.Fuzzing.Workers)
+	cancelChan := make(chan bool, f.config.Fuzzing.Workers)
+
+	for i := 0; i < len(f.workers); i++ {
+		wg.Add(1)
+		go func(workerIndex int) {
+			defer wg.Done()
+
+			worker := f.workers[workerIndex]
+			if worker == nil {
+				return
+			}
+
+			// Check for emergency context cancellation
+			if utils.CheckContextDone(f.emergencyCtx) {
+				cancelChan <- true
+				return
+			}
+
+			// Handle main context cancellation - don't return yet, as we need to process shrink requests
+			fuzzingComplete := false
+			if utils.CheckContextDone(f.ctx) {
+				fuzzingComplete = true
+				err := worker.Events.TestingComplete.Publish(FuzzerWorkerTestingCompleteEvent{
+					Worker: worker,
+				})
+				if err != nil {
+					errChan <- fmt.Errorf("error returned by an event handler: %v", err)
+					return
+				}
+			}
+
+			// Process any pending shrink requests
+			for _, shrinkCallSequenceRequest := range worker.shrinkCallSequenceRequests {
+				if utils.CheckContextDone(f.emergencyCtx) {
+					cancelChan <- true
+					return
+				}
+				_, err := worker.shrinkCallSequence(shrinkCallSequenceRequest)
+				if err != nil {
+					errChan <- err
+					return
+				}
+			}
+
+			// Clear shrink requests now that they've been processed
+			worker.shrinkCallSequenceRequests = nil
+
+			// If fuzzing is complete, signal cancellation
+			if fuzzingComplete {
+				cancelChan <- true
+				return
+			}
+
+			// Setup chain if this is the first run
+			if worker.chain == nil {
+				var err error
+				worker.chain, err = baseTestChain.Clone(func(initializedChain *chain.TestChain) error {
+					// Subscribe our chain event handlers
+					initializedChain.Events.ContractDeploymentAddedEventEmitter.Subscribe(worker.onChainContractDeploymentAddedEvent)
+					initializedChain.Events.ContractDeploymentRemovedEventEmitter.Subscribe(worker.onChainContractDeploymentRemovedEvent)
+
+					// If we have coverage-guided fuzzing enabled, create a tracer to collect coverage and connect it to the chain
+					if f.config.Fuzzing.CoverageEnabled {
+						worker.coverageTracer = coverage.NewCoverageTracer()
+						initializedChain.AddTracer(worker.coverageTracer.NativeTracer(), true, false)
+					}
+
+					// Copy the labels from the base chain to the worker's chain
+					initializedChain.Labels = maps.Clone(baseTestChain.Labels)
+
+					// Emit an event indicating the worker has created its chain
+					err := worker.Events.FuzzerWorkerChainCreated.Publish(FuzzerWorkerChainCreatedEvent{
+						Worker: worker,
+						Chain:  initializedChain,
+					})
+					return err
+				})
+
+				if err != nil {
+					errChan <- err
+					return
+				}
+
+				// Emit an event indicating the worker has set up its chain
+				err = worker.Events.FuzzerWorkerChainSetup.Publish(FuzzerWorkerChainSetupEvent{
+					Worker: worker,
+					Chain:  worker.chain,
+				})
+				if err != nil {
+					errChan <- fmt.Errorf("error returned by an event handler: %v", err)
+					return
+				}
+
+				// Increase our generation metric
+				worker.workerMetrics().workerStartupCount.Add(worker.workerMetrics().workerStartupCount, big.NewInt(1))
+
+				// Save the current block index as all contracts have been deployed at this point
+				worker.testingBaseBlockIndex = uint64(len(worker.chain.CommittedBlocks()))
+			} else {
+				// If we already have a chain, revert to the base state
+				err := worker.chain.RevertToBlockIndex(worker.testingBaseBlockIndex)
+				if err != nil {
+					errChan <- err
+					return
+				}
+			}
+
+			// Emit event indicating the worker is about to test a new call sequence
+			err := worker.Events.CallSequenceTesting.Publish(FuzzerWorkerCallSequenceTestingEvent{
+				Worker: worker,
+			})
+			if err != nil {
+				errChan <- fmt.Errorf("error returned by an event handler: %v", err)
+				return
+			}
+		}(i)
+	}
+
+	// Wait for all workers to finish preparation
+	wg.Wait()
+	close(errChan)
+	close(cancelChan)
+
+	// Check if there were any errors
+	for err := range errChan {
+		return false, err
+	}
+
+	// Check if any workers signaled cancellation
+	for cancel := range cancelChan {
+		if cancel {
+			return true, nil
+		}
+	}
+
+	return false, nil
+}
+
+// launchGPUKernel simulates a GPU kernel that runs testNextCallSequence for each worker in parallel
+func (f *Fuzzer) launchGPUKernel() error {
+	f.logger.Info("Launching GPU kernel (simulated) to execute testNextCallSequence in parallel")
+
+	// Create channels to collect results and errors
+	type workerResult struct {
+		workerIndex    int
+		shrinkRequests []ShrinkCallSequenceRequest
+		err            error
+	}
+	resultChan := make(chan workerResult, f.config.Fuzzing.Workers)
+
+	// Create a wait group to ensure all workers complete
+	var wg sync.WaitGroup
+
+	// In a real GPU implementation, this would be translated to a single GPU kernel call
+	// For simulation, we'll run each worker in its own goroutine to better simulate parallel execution
+	for i := 0; i < len(f.workers); i++ {
+		worker := f.workers[i]
+		if worker == nil || worker.chain == nil {
+			continue
+		}
+
+		// Check if we should stop execution
+		if utils.CheckContextDone(f.emergencyCtx) || utils.CheckContextDone(f.ctx) {
 			break
-		} else {
-			time.Sleep(50 * time.Millisecond)
+		}
+
+		wg.Add(1)
+		go func(workerIndex int, w *FuzzerWorker) {
+			defer wg.Done()
+
+			// Execute the GPU kernel simulation for this worker
+			shrinkRequests, err := w.run_gpu_kernel()
+
+			// Store the results to be processed later
+			resultChan <- workerResult{
+				workerIndex:    workerIndex,
+				shrinkRequests: shrinkRequests,
+				err:            err,
+			}
+		}(i, worker)
+	}
+
+	// Wait for all workers to complete
+	go func() {
+		wg.Wait()
+		close(resultChan)
+	}()
+
+	// Process the results from the simulated GPU execution
+	for result := range resultChan {
+		if result.err != nil {
+			return result.err
+		}
+
+		worker := f.workers[result.workerIndex]
+		if worker != nil {
+			// Add any new shrink requests to the worker's list
+			worker.shrinkCallSequenceRequests = append(worker.shrinkCallSequenceRequests, result.shrinkRequests...)
+
+			// Emit an event indicating the worker finished testing a new call sequence
+			err := worker.Events.CallSequenceTested.Publish(FuzzerWorkerCallSequenceTestedEvent{
+				Worker: worker,
+			})
+			if err != nil {
+				return fmt.Errorf("error publishing call sequence tested event: %v", err)
+			}
 		}
 	}
-	return err
+
+	return nil
+}
+
+// processWorkersResultsInParallel handles all post-processing logic in parallel
+// Returns a boolean indicating if workers should be cancelled and an error if one occurred
+func (f *Fuzzer) processWorkersResultsInParallel() (bool, error) {
+	var wg sync.WaitGroup
+	errChan := make(chan error, f.config.Fuzzing.Workers)
+	cancelChan := make(chan bool, f.config.Fuzzing.Workers)
+
+	for i := 0; i < len(f.workers); i++ {
+		wg.Add(1)
+		go func(workerIndex int) {
+			defer wg.Done()
+
+			worker := f.workers[workerIndex]
+			if worker == nil || worker.chain == nil {
+				return
+			}
+
+			// Check for emergency context cancellation
+			if utils.CheckContextDone(f.emergencyCtx) {
+				cancelChan <- true
+				return
+			}
+
+			// Emit event indicating the worker finished testing a call sequence
+			err := worker.Events.CallSequenceTested.Publish(FuzzerWorkerCallSequenceTestedEvent{
+				Worker: worker,
+			})
+			if err != nil {
+				errChan <- fmt.Errorf("error returned by an event handler: %v", err)
+				return
+			}
+
+			// Update metrics
+			worker.workerMetrics().sequencesTested.Add(worker.workerMetrics().sequencesTested, big.NewInt(1))
+
+			// Check if we've reached the worker reset limit
+			sequencesTested := worker.workerMetrics().sequencesTested.Uint64()
+			if sequencesTested > uint64(worker.fuzzer.config.Fuzzing.WorkerResetLimit) {
+				// Close the chain to free resources
+				if worker.chain != nil {
+					worker.chain.Close()
+					worker.chain = nil
+				}
+			}
+		}(i)
+	}
+
+	// Wait for all workers to finish post-processing
+	wg.Wait()
+	close(errChan)
+	close(cancelChan)
+
+	// Check if there were any errors
+	for err := range errChan {
+		return false, err
+	}
+
+	// Check if any workers signaled cancellation
+	for cancel := range cancelChan {
+		if cancel {
+			return true, nil
+		}
+	}
+
+	return false, nil
 }
 
 // Start begins a fuzzing operation on the provided project configuration. This operation will not return until an error
@@ -875,7 +1122,7 @@ func (f *Fuzzer) Start() error {
 		f.logger.Error("Failed to start fuzzer", err)
 		return err
 	}
-
+	fmt.Println("fuzzer start")
 	// Run the main worker loop
 	err = f.spawnWorkersLoop(baseTestChain)
 	if err != nil {

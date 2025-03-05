@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/crytic/medusa/chain"
-
 	"github.com/crytic/medusa-geth/accounts/abi"
 	"github.com/crytic/medusa-geth/common"
 	"github.com/crytic/medusa-geth/crypto"
+	"github.com/crytic/medusa/chain"
+
 	chainTypes "github.com/crytic/medusa/chain/types"
 	fuzzingTypes "github.com/crytic/medusa/fuzzing/contracts"
 	"github.com/crytic/medusa/fuzzing/executiontracer"

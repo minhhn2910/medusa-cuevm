@@ -699,3 +699,20 @@ func (fw *FuzzerWorker) run(baseTestChain *chain.TestChain) (bool, error) {
 	// We have not cancelled fuzzing operations, but this worker exited, signalling for it to be regenerated.
 	return false, nil
 }
+
+// run_gpu_kernel performs only the testNextCallSequence operation
+// This function is designed to be called from a simulated GPU kernel
+func (fw *FuzzerWorker) run_gpu_kernel() ([]ShrinkCallSequenceRequest, error) {
+	// Check if we should terminate early
+	if utils.CheckContextDone(fw.fuzzer.emergencyCtx) || utils.CheckContextDone(fw.fuzzer.ctx) {
+		return nil, nil
+	}
+
+	// This is the core operation that would run on the GPU
+	shrinkRequests, err := fw.testNextCallSequence()
+	if err != nil {
+		return nil, err
+	}
+
+	return shrinkRequests, nil
+}
