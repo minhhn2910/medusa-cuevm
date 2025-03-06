@@ -818,8 +818,98 @@ func (f *Fuzzer) prepareWorkersDataInParallel(baseTestChain *chain.TestChain) (b
 				}
 			}
 
+			// Prepare execution data for GPU kernel
+			worker.originalValueSet = worker.valueSet.Clone()
+
+			// Initialize a new sequence within our sequence generator
+			isNewSequence, err := worker.sequenceGenerator.InitializeNextSequence()
+			if err != nil {
+				errChan <- err
+				return
+			}
+			worker.isNewSequence = isNewSequence
+
+			// Prepare a fresh list for shrink requests
+			worker.pendingShrinkRequests = make([]ShrinkCallSequenceRequest, 0)
+
+			// Create execution check function for this worker
+			worker.executionCheckFunc = func(currentlyExecutedSequence calls.CallSequence) (bool, error) {
+				// Get the last call sequence element that was executed
+				latestCallSequenceElement := currentlyExecutedSequence[len(currentlyExecutedSequence)-1]
+				// Get the decoded return values and add it to the base value set
+				// Don't throw an error since we care more about coverage than adding the return values to the base value set
+				decodedReturnValues, err := latestCallSequenceElement.DecodedReturnValues()
+				if decodedReturnValues != nil && err == nil {
+					worker.valueSet.Add(decodedReturnValues)
+				}
+
+				// Check for updates to coverage and corpus.
+				// If we detect coverage changes, add this sequence with weight as 1 + sequences tested (to avoid zero weights)
+				err = f.corpus.CheckSequenceCoverageAndUpdate(currentlyExecutedSequence, worker.getNewCorpusCallSequenceWeight(), true)
+				if err != nil {
+					return true, err
+				}
+
+				// Loop through each test function, signal our worker tested a call, and collect any requests to shrink
+				// this call sequence.
+				for _, callSequenceTestFunc := range f.Hooks.CallSequenceTestFuncs {
+					newShrinkRequests, err := callSequenceTestFunc(worker, currentlyExecutedSequence)
+					if err != nil {
+						return true, err
+					}
+					worker.pendingShrinkRequests = append(worker.pendingShrinkRequests, newShrinkRequests...)
+				}
+
+				// Update our metrics
+				worker.workerMetrics().callsTested.Add(worker.workerMetrics().callsTested, big.NewInt(1))
+				lastCallSequenceElement := currentlyExecutedSequence[len(currentlyExecutedSequence)-1]
+				worker.workerMetrics().gasUsed.Add(worker.workerMetrics().gasUsed, new(big.Int).SetUint64(lastCallSequenceElement.ChainReference.Block.MessageResults[lastCallSequenceElement.ChainReference.TransactionIndex].Receipt.GasUsed))
+
+				// If our fuzzer context or the emergency context is cancelled, exit out immediately without results.
+				if utils.CheckContextDone(f.ctx) {
+					return true, nil
+				}
+
+				// If we have shrink requests, it means we violated a test, so we quit at this point
+				return len(worker.pendingShrinkRequests) > 0, nil
+			}
+
+			// NEW: Prepare the call sequence elements list for this worker
+			worker.callSequenceElements = make([]*calls.CallSequenceElement, 0)
+			// Track nonces for each sender address
+			nonceMap := make(map[common.Address]uint64)
+
+			// Populate the list with elements from the sequence generator
+			for i := 0; ; i++ {
+				element, err := worker.sequenceGenerator.PopSequenceElement()
+				if err != nil {
+					errChan <- err
+					return
+				}
+				if element == nil {
+					break
+				}
+
+				// Fix nonce if needed
+				if element.Call != nil {
+					sender := element.Call.From
+					currentNonce, exists := nonceMap[sender]
+
+					if exists && element.Call.Nonce <= currentNonce {
+						// Update nonce if it's not greater than the current nonce for this sender
+						element.Call.Nonce = currentNonce + 1
+					}
+
+					// Update the nonce map with the latest value
+					nonceMap[sender] = element.Call.Nonce
+				}
+
+				worker.callSequenceElements = append(worker.callSequenceElements, element)
+			}
+			// print the call sequence elements
+			// fmt.Println("callSequenceElements: ", worker.callSequenceElements)
 			// Emit event indicating the worker is about to test a new call sequence
-			err := worker.Events.CallSequenceTesting.Publish(FuzzerWorkerCallSequenceTestingEvent{
+			err = worker.Events.CallSequenceTesting.Publish(FuzzerWorkerCallSequenceTestingEvent{
 				Worker: worker,
 			})
 			if err != nil {
@@ -849,23 +939,12 @@ func (f *Fuzzer) prepareWorkersDataInParallel(baseTestChain *chain.TestChain) (b
 	return false, nil
 }
 
-// launchGPUKernel simulates a GPU kernel that runs testNextCallSequence for each worker in parallel
+// launchGPUKernel simulates a GPU kernel that executes call sequences using the prepared elements lists
 func (f *Fuzzer) launchGPUKernel() error {
-	f.logger.Info("Launching GPU kernel (simulated) to execute testNextCallSequence in parallel")
-
-	// Create channels to collect results and errors
-	type workerResult struct {
-		workerIndex    int
-		shrinkRequests []ShrinkCallSequenceRequest
-		err            error
-	}
-	resultChan := make(chan workerResult, f.config.Fuzzing.Workers)
-
-	// Create a wait group to ensure all workers complete
-	var wg sync.WaitGroup
+	f.logger.Info("Launching GPU kernel (simulated) to execute call sequences with prepared element lists")
 
 	// In a real GPU implementation, this would be translated to a single GPU kernel call
-	// For simulation, we'll run each worker in its own goroutine to better simulate parallel execution
+	// For simulation, we'll process each worker's element list
 	for i := 0; i < len(f.workers); i++ {
 		worker := f.workers[i]
 		if worker == nil || worker.chain == nil {
@@ -877,47 +956,12 @@ func (f *Fuzzer) launchGPUKernel() error {
 			break
 		}
 
-		wg.Add(1)
-		go func(workerIndex int, w *FuzzerWorker) {
-			defer wg.Done()
-
-			// Execute the GPU kernel simulation for this worker
-			shrinkRequests, err := w.run_gpu_kernel()
-
-			// Store the results to be processed later
-			resultChan <- workerResult{
-				workerIndex:    workerIndex,
-				shrinkRequests: shrinkRequests,
-				err:            err,
-			}
-		}(i, worker)
-	}
-
-	// Wait for all workers to complete
-	go func() {
-		wg.Wait()
-		close(resultChan)
-	}()
-
-	// Process the results from the simulated GPU execution
-	for result := range resultChan {
-		if result.err != nil {
-			return result.err
-		}
-
-		worker := f.workers[result.workerIndex]
-		if worker != nil {
-			// Add any new shrink requests to the worker's list
-			worker.shrinkCallSequenceRequests = append(worker.shrinkCallSequenceRequests, result.shrinkRequests...)
-
-			// Emit an event indicating the worker finished testing a new call sequence
-			err := worker.Events.CallSequenceTested.Publish(FuzzerWorkerCallSequenceTestedEvent{
-				Worker: worker,
-			})
-			if err != nil {
-				return fmt.Errorf("error publishing call sequence tested event: %v", err)
-			}
-		}
+		// Execute the call sequence using the prepared list of elements
+		_, worker.lastExecutionError = calls.SimulateExecuteCallSequenceGPUWithList(
+			worker.chain,
+			worker.callSequenceElements,
+			worker.executionCheckFunc,
+		)
 	}
 
 	return nil
@@ -943,6 +987,41 @@ func (f *Fuzzer) processWorkersResultsInParallel() (bool, error) {
 			// Check for emergency context cancellation
 			if utils.CheckContextDone(f.emergencyCtx) {
 				cancelChan <- true
+				return
+			}
+
+			// Process execution results
+
+			// If our fuzzer context is done, clear errors
+			if utils.CheckContextDone(f.ctx) {
+				worker.lastExecutionError = nil
+			}
+
+			// If this was not a new call sequence, indicate not to save the shrunken result to the corpus again
+			if !worker.isNewSequence {
+				for i := 0; i < len(worker.pendingShrinkRequests); i++ {
+					worker.pendingShrinkRequests[i].RecordResultInCorpus = false
+				}
+			}
+
+			// Add any new shrink requests to the worker's list for next iteration
+			if len(worker.pendingShrinkRequests) > 0 {
+				worker.shrinkCallSequenceRequests = append(worker.shrinkCallSequenceRequests, worker.pendingShrinkRequests...)
+			}
+
+			// Reset value set to original
+			worker.valueSet = worker.originalValueSet
+
+			// Reset chain state
+			if worker.lastExecutionError == nil {
+				err := worker.chain.RevertToBlockIndex(worker.testingBaseBlockIndex)
+				if err != nil {
+					errChan <- err
+					return
+				}
+			} else {
+				// Return any execution error
+				errChan <- worker.lastExecutionError
 				return
 			}
 
