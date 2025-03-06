@@ -466,7 +466,9 @@ func (fw *FuzzerWorker) shrinkCallSequence(shrinkRequest ShrinkCallSequenceReque
 
 	// Obtain our shrink limits and begin shrinking.
 	shrinkIteration := uint64(0)
-	shrinkLimit := fw.fuzzer.config.Fuzzing.ShrinkLimit
+	// shrinkLimit := fw.fuzzer.config.Fuzzing.ShrinkLimit
+	// TODO: March 2025 temporarily disable shrinking, todo: reenable
+	shrinkLimit := uint64(0)
 	shrinkingEnded := func() bool {
 		return shrinkIteration >= shrinkLimit || utils.CheckContextDone(fw.fuzzer.emergencyCtx)
 	}
