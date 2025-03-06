@@ -373,110 +373,89 @@ func SimulateExecuteCallSequenceGPUWithList(
 	execCheckFuncRequestedBreak := false
 
 	// Loop through each sequence element in our provided list
-	for i := 0; i < len(elements); i++ {
-		callSequenceElement := elements[i]
+	for _, callSequenceElement := range elements {
 
-		// Skip nil elements
-		if callSequenceElement == nil {
-			continue
+		// If we have a pending block, but we intend to delay this call from the last, we commit that block.
+		if chain.PendingBlock() != nil && callSequenceElement.BlockNumberDelay > 0 {
+			err := chain.PendingBlockCommit()
+			if err != nil {
+				return callSequenceExecuted, err
+			}
 		}
 
-		// We try to add the transaction with our call more than once. If the pending block is too full, we may hit a
-		// block gas limit, which we handle by committing the pending block without this tx, and creating a new pending
-		// block that is empty to try adding this tx there instead.
-		// If we encounter an error on an empty block, we throw the error as there is nothing more we can do.
-		for {
-			// If we have a pending block, but we intend to delay this call from the last, we commit that block.
-			if chain.PendingBlock() != nil && callSequenceElement.BlockNumberDelay > 0 {
+		// If we have no pending block to add a tx containing our call to, we must create one.
+		if chain.PendingBlock() == nil {
+			// The minimum step between blocks must be 1 in block number and timestamp, so we ensure this is the
+			// case.
+			numberDelay := callSequenceElement.BlockNumberDelay
+			timeDelay := callSequenceElement.BlockTimestampDelay
+			if numberDelay == 0 {
+				numberDelay = 1
+			}
+			if timeDelay == 0 {
+				timeDelay = 1
+			}
+
+			// Each timestamp/block number must be unique as well, so we cannot jump more block numbers than time.
+			if numberDelay > timeDelay {
+				numberDelay = timeDelay
+			}
+			_, err := chain.PendingBlockCreateWithParameters(chain.Head().Header.Number.Uint64()+numberDelay, chain.Head().Header.Time+timeDelay, nil)
+			if err != nil {
+				return callSequenceExecuted, err
+			}
+		}
+
+		// Try to add our transaction to this block.
+		err := chain.PendingBlockAddTx(callSequenceElement.Call.ToCoreMessage(), additionalTracers...)
+
+		if err != nil {
+			// If we encountered a block gas limit error, this tx is too expensive to fit in this block.
+			// If there are other transactions in the block, this makes sense. The block is "full".
+			// In that case, we commit the pending block without this tx, and create a new pending block to add
+			// our tx to, and iterate to try and add it again.
+			// TODO: This should also check the condition that this is a block gas error specifically. For now, we
+			//  simply assume it is and try processing in an empty block (if that fails, that error will be
+			//  returned).
+			if len(chain.PendingBlock().Messages) > 0 {
 				err := chain.PendingBlockCommit()
 				if err != nil {
 					return callSequenceExecuted, err
 				}
+				continue
 			}
 
-			// If we have no pending block to add a tx containing our call to, we must create one.
-			if chain.PendingBlock() == nil {
-				// The minimum step between blocks must be 1 in block number and timestamp, so we ensure this is the
-				// case.
-				numberDelay := callSequenceElement.BlockNumberDelay
-				timeDelay := callSequenceElement.BlockTimestampDelay
-				if numberDelay == 0 {
-					numberDelay = 1
-				}
-				if timeDelay == 0 {
-					timeDelay = 1
-				}
+			// If there are no transactions in our block, and we failed to add this one, return the error
+			return callSequenceExecuted, err
+		}
 
-				// Each timestamp/block number must be unique as well, so we cannot jump more block numbers than time.
-				if numberDelay > timeDelay {
-					numberDelay = timeDelay
-				}
-				_, err := chain.PendingBlockCreateWithParameters(chain.Head().Header.Number.Uint64()+numberDelay, chain.Head().Header.Time+timeDelay, nil)
-				if err != nil {
-					return callSequenceExecuted, err
-				}
-			}
+		// Update our chain reference for this element.
+		callSequenceElement.ChainReference = &CallSequenceElementChainReference{
+			Block:            chain.PendingBlock(),
+			TransactionIndex: len(chain.PendingBlock().Messages) - 1,
+		}
 
-			// Try to add our transaction to this block.
-			err := chain.PendingBlockAddTx(callSequenceElement.Call.ToCoreMessage(), additionalTracers...)
+		// Add to our executed call sequence
+		callSequenceExecuted = append(callSequenceExecuted, callSequenceElement)
 
+		// We added our call to the block as a transaction. Call our step function with the update and check
+		// if it returned an error.
+		if executionCheckFunc != nil {
+			execCheckFuncRequestedBreak, err = executionCheckFunc(callSequenceExecuted)
 			if err != nil {
-				// If we encountered a block gas limit error, this tx is too expensive to fit in this block.
-				// If there are other transactions in the block, this makes sense. The block is "full".
-				// In that case, we commit the pending block without this tx, and create a new pending block to add
-				// our tx to, and iterate to try and add it again.
-				// TODO: This should also check the condition that this is a block gas error specifically. For now, we
-				//  simply assume it is and try processing in an empty block (if that fails, that error will be
-				//  returned).
-				if len(chain.PendingBlock().Messages) > 0 {
-					err := chain.PendingBlockCommit()
-					if err != nil {
-						return callSequenceExecuted, err
-					}
-					continue
-				}
-
-				// If there are no transactions in our block, and we failed to add this one, return the error
 				return callSequenceExecuted, err
 			}
 
-			// Update our chain reference for this element.
-			callSequenceElement.ChainReference = &CallSequenceElementChainReference{
-				Block:            chain.PendingBlock(),
-				TransactionIndex: len(chain.PendingBlock().Messages) - 1,
+			// If post-execution check requested we break execution, break out of our "retry loop"
+			if execCheckFuncRequestedBreak {
+				break
 			}
-
-			// Add to our executed call sequence
-			callSequenceExecuted = append(callSequenceExecuted, callSequenceElement)
-
-			// We added our call to the block as a transaction. Call our step function with the update and check
-			// if it returned an error.
-			if executionCheckFunc != nil {
-				execCheckFuncRequestedBreak, err = executionCheckFunc(callSequenceExecuted)
-				if err != nil {
-					return callSequenceExecuted, err
-				}
-
-				// If post-execution check requested we break execution, break out of our "retry loop"
-				if execCheckFuncRequestedBreak {
-					break
-				}
-			}
-
-			// We didn't encounter an error, so we were successful in adding this transaction. Break out of this
-			// inner "retry loop" and move onto processing the next element in the outer loop.
-			break
 		}
 
-		// If post-execution check requested we break execution, break out of our "execute next call sequence loop"
-		if execCheckFuncRequestedBreak {
-			break
-		}
 	}
 
 	// Commit the last pending block.
 	if chain.PendingBlock() != nil {
-		fmt.Println("pending block: ", chain.PendingBlock())
 		err := chain.PendingBlockCommit()
 		if err != nil {
 			return callSequenceExecuted, err

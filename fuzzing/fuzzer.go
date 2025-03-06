@@ -26,7 +26,10 @@ import (
 
 	"github.com/crytic/medusa/fuzzing/calls"
 	"github.com/crytic/medusa/utils/randomutils"
+	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
+
+	"unsafe"
 
 	"github.com/crytic/medusa/chain"
 	compilationTypes "github.com/crytic/medusa/compilation/types"
@@ -41,6 +44,14 @@ import (
 	"golang.org/x/exp/maps"
 	"golang.org/x/exp/slices"
 )
+
+/*
+#cgo CFLAGS: -I${SRCDIR}/gpu
+#cgo LDFLAGS: -L${SRCDIR}/gpu -lstategpu -Wl,-rpath,${SRCDIR}/gpu
+#include "state_gpu.h"
+#include <stdlib.h>
+*/
+import "C"
 
 // Fuzzer represents an Ethereum smart contract fuzzing provider.
 type Fuzzer struct {
@@ -744,9 +755,14 @@ func (f *Fuzzer) prepareWorkersDataInParallel(baseTestChain *chain.TestChain) (b
 
 			// Process any pending shrink requests
 			for _, shrinkCallSequenceRequest := range worker.shrinkCallSequenceRequests {
+				fmt.Println("processing shrink call sequence request", shrinkCallSequenceRequest)
 				if utils.CheckContextDone(f.emergencyCtx) {
 					cancelChan <- true
 					return
+				}
+				if worker.chain == nil {
+					fmt.Println("worker.chain is nil, skipping shrink call sequence request")
+					break
 				}
 				_, err := worker.shrinkCallSequence(shrinkCallSequenceRequest)
 				if err != nil {
@@ -766,6 +782,8 @@ func (f *Fuzzer) prepareWorkersDataInParallel(baseTestChain *chain.TestChain) (b
 
 			// Setup chain if this is the first run
 			if worker.chain == nil {
+				fmt.Println("worker.chain is nil, setting up worker chain")
+
 				var err error
 				worker.chain, err = baseTestChain.Clone(func(initializedChain *chain.TestChain) error {
 					// Subscribe our chain event handlers
@@ -786,6 +804,7 @@ func (f *Fuzzer) prepareWorkersDataInParallel(baseTestChain *chain.TestChain) (b
 						Worker: worker,
 						Chain:  initializedChain,
 					})
+					fmt.Println("error in fuzzer worker chain created clone", err)
 					return err
 				})
 
@@ -809,6 +828,7 @@ func (f *Fuzzer) prepareWorkersDataInParallel(baseTestChain *chain.TestChain) (b
 
 				// Save the current block index as all contracts have been deployed at this point
 				worker.testingBaseBlockIndex = uint64(len(worker.chain.CommittedBlocks()))
+
 			} else {
 				// If we already have a chain, revert to the base state
 				err := worker.chain.RevertToBlockIndex(worker.testingBaseBlockIndex)
@@ -939,12 +959,106 @@ func (f *Fuzzer) prepareWorkersDataInParallel(baseTestChain *chain.TestChain) (b
 	return false, nil
 }
 
-// launchGPUKernel simulates a GPU kernel that executes call sequences using the prepared elements lists
-func (f *Fuzzer) launchGPUKernel() error {
-	f.logger.Info("Launching GPU kernel (simulated) to execute call sequences with prepared element lists")
+// prepareStateDataForGPU extracts state data from the blockchain state for use in GPU operations
+func (f *Fuzzer) prepareStateDataForGPU(state *state.StateDB) (*StateDataForGPU, error) {
+	// Create our state data container
+	stateData := &StateDataForGPU{
+		Root:     "",
+		Accounts: make([]AccountDataForGPU, 0),
+	}
 
-	// In a real GPU implementation, this would be translated to a single GPU kernel call
-	// For simulation, we'll process each worker's element list
+	// Get raw state dump
+	stateDump := state.RawDump(nil)
+
+	stateData.Root = stateDump.Root
+
+	// Process accounts (limit to most relevant accounts for GPU processing)
+	maxAccounts := 1000 // Adjust based on GPU memory constraints
+	count := 0
+
+	for addr, account := range stateDump.Accounts {
+		// Create account data structure
+		accountData := AccountDataForGPU{
+			Address:     addr,
+			Balance:     account.Balance,
+			Nonce:       account.Nonce,
+			Root:        account.Root,
+			CodeHash:    account.CodeHash,
+			HasCode:     len(account.Code) > 0,
+			CodeLength:  len(account.Code),
+			StorageKeys: make([]string, 0),
+			StorageVals: make([]string, 0),
+		}
+
+		// Only include code if it exists and isn't too large
+		if len(account.Code) > 0 && len(account.Code) < 1024*10 { // 10KB limit
+			accountData.Code = account.Code
+		}
+
+		// Add storage entries (limit number to prevent excessive data transfer)
+		storageLimit := 100
+		storageCount := 0
+		for key, value := range account.Storage {
+			fmt.Println("key: ", key.Hex(), "value: ", value)
+			if storageCount >= storageLimit {
+				break
+			}
+			accountData.StorageKeys = append(accountData.StorageKeys, key.Hex())
+			accountData.StorageVals = append(accountData.StorageVals, value)
+			storageCount++
+		}
+
+		// Add to our accounts list
+		stateData.Accounts = append(stateData.Accounts, accountData)
+
+		count++
+		if count >= maxAccounts {
+			break
+		}
+	}
+
+	return stateData, nil
+}
+
+// StateDataForGPU contains blockchain state data formatted for passing to GPU
+type StateDataForGPU struct {
+	Root     string              `json:"root"`
+	Accounts []AccountDataForGPU `json:"accounts"`
+}
+
+// AccountDataForGPU contains account data formatted for passing to GPU
+type AccountDataForGPU struct {
+	Address     string   `json:"address"`
+	Balance     string   `json:"balance"`
+	Nonce       uint64   `json:"nonce"`
+	Root        []byte   `json:"root"`
+	CodeHash    []byte   `json:"codeHash"`
+	HasCode     bool     `json:"hasCode"`
+	Code        []byte   `json:"code,omitempty"`
+	CodeLength  int      `json:"codeLength"`
+	StorageKeys []string `json:"storageKeys"`
+	StorageVals []string `json:"storageVals"`
+}
+
+// Modified launchGPUKernel to include state data preparation and passing to C++
+func (f *Fuzzer) launchGPUKernel() error {
+	f.logger.Info("Launching GPU kernel to execute call sequences with prepared element lists")
+
+	// Get state data from our base test chain for GPU processing
+	if len(f.workers) > 0 && f.workers[0] != nil && f.workers[0].chain != nil {
+		tmp_state := f.workers[0].chain.State()
+		if stateDB, ok := tmp_state.(*state.StateDB); ok {
+			stateData, err := f.prepareStateDataForGPU(stateDB)
+			if err != nil {
+				f.logger.Warn("Failed to prepare state data for GPU", err)
+			} else {
+				// Call the C++ function to process the state data
+				f.processStateDataInGPU(stateData)
+			}
+		}
+	}
+
+	// Existing simulation code
 	for i := 0; i < len(f.workers); i++ {
 		worker := f.workers[i]
 		if worker == nil || worker.chain == nil {
@@ -965,6 +1079,74 @@ func (f *Fuzzer) launchGPUKernel() error {
 	}
 
 	return nil
+}
+
+// processStateDataInGPU passes the state data to a C++ function for GPU processing
+func (f *Fuzzer) processStateDataInGPU(stateData *StateDataForGPU) {
+	fmt.Println("Go: Processing state data in GPU")
+	// Create a new state data container in C++
+	cStateData := C.create_state_data()
+	defer C.free_state_data(cStateData) // Ensure memory is freed
+
+	// Set state root
+	cStateRoot := C.CString(stateData.Root)
+	defer C.free(unsafe.Pointer(cStateRoot))
+	C.set_state_root(cStateData, cStateRoot)
+
+	// Add accounts
+	for _, account := range stateData.Accounts {
+		// Convert strings to C strings
+		cAddress := C.CString(account.Address)
+		cBalance := C.CString(account.Balance)
+
+		// Convert byte slices to C arrays
+		var cRoot, cCodeHash, cCode *C.uchar
+		var rootLen, codeHashLen, codeLen C.int
+
+		if len(account.Root) > 0 {
+			cRoot = (*C.uchar)(unsafe.Pointer(&account.Root[0]))
+			rootLen = C.int(len(account.Root))
+		}
+
+		if len(account.CodeHash) > 0 {
+			cCodeHash = (*C.uchar)(unsafe.Pointer(&account.CodeHash[0]))
+			codeHashLen = C.int(len(account.CodeHash))
+		}
+
+		if len(account.Code) > 0 {
+			cCode = (*C.uchar)(unsafe.Pointer(&account.Code[0]))
+			codeLen = C.int(len(account.Code))
+		}
+
+		// Add the account
+		C.add_account(
+			cStateData,
+			cAddress,
+			cBalance,
+			C.ulong(account.Nonce),
+			cRoot, rootLen,
+			cCodeHash, codeHashLen,
+			cCode, codeLen,
+		)
+
+		// Free C strings
+		C.free(unsafe.Pointer(cAddress))
+		C.free(unsafe.Pointer(cBalance))
+
+		// Add storage entries
+		for i := 0; i < len(account.StorageKeys); i++ {
+			cKey := C.CString(account.StorageKeys[i])
+			cValue := C.CString(account.StorageVals[i])
+
+			C.add_storage_entry(cStateData, cKey, cValue)
+
+			C.free(unsafe.Pointer(cKey))
+			C.free(unsafe.Pointer(cValue))
+		}
+	}
+
+	// Process the state data in C++
+	C.process_state_data_gpu(cStateData)
 }
 
 // processWorkersResultsInParallel handles all post-processing logic in parallel
@@ -1045,6 +1227,7 @@ func (f *Fuzzer) processWorkersResultsInParallel() (bool, error) {
 					worker.chain.Close()
 					worker.chain = nil
 				}
+				worker.workerMetrics().sequencesTested = big.NewInt(0)
 			}
 		}(i)
 	}
@@ -1173,6 +1356,8 @@ func (f *Fuzzer) Start() error {
 		return err
 	}
 	fmt.Println("fuzzer start")
+	fmt.Println("baseTestChain.CommittedBlocks(): ", baseTestChain.CommittedBlocks())
+	fmt.Println("baseTestChain.State(): ", baseTestChain.State())
 	// Run the main worker loop
 	err = f.spawnWorkersLoop(baseTestChain)
 	if err != nil {
