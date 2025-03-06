@@ -66,6 +66,26 @@ type FuzzerWorker struct {
 
 	// Events describes the event system for the FuzzerWorker.
 	Events FuzzerWorkerEvents
+
+	// originalValueSet holds the original value set before mutation for easy reset
+	originalValueSet *valuegeneration.ValueSet
+
+	// isNewSequence indicates if the current sequence is newly generated
+	isNewSequence bool
+
+	// pendingShrinkRequests collects shrink requests during execution
+	pendingShrinkRequests []ShrinkCallSequenceRequest
+
+	// fetchElementFunc provides elements for the call sequence
+	// fetchElementFunc func(currentIndex int) (*calls.CallSequenceElement, error)
+
+	// executionCheckFunc processes results after each call execution
+	executionCheckFunc func(currentlyExecutedSequence calls.CallSequence) (bool, error)
+
+	// lastExecutionError holds any error from the last execution
+	lastExecutionError error
+
+	callSequenceElements []*calls.CallSequenceElement
 }
 
 // newFuzzerWorker creates a new FuzzerWorker, assigning it the provided worker index/id and associating it to the
@@ -698,21 +718,4 @@ func (fw *FuzzerWorker) run(baseTestChain *chain.TestChain) (bool, error) {
 
 	// We have not cancelled fuzzing operations, but this worker exited, signalling for it to be regenerated.
 	return false, nil
-}
-
-// run_gpu_kernel performs only the testNextCallSequence operation
-// This function is designed to be called from a simulated GPU kernel
-func (fw *FuzzerWorker) run_gpu_kernel() ([]ShrinkCallSequenceRequest, error) {
-	// Check if we should terminate early
-	if utils.CheckContextDone(fw.fuzzer.emergencyCtx) || utils.CheckContextDone(fw.fuzzer.ctx) {
-		return nil, nil
-	}
-
-	// This is the core operation that would run on the GPU
-	shrinkRequests, err := fw.testNextCallSequence()
-	if err != nil {
-		return nil, err
-	}
-
-	return shrinkRequests, nil
 }
