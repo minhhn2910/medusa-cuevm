@@ -26,7 +26,9 @@ import (
 
 	"github.com/crytic/medusa/fuzzing/calls"
 	"github.com/crytic/medusa/utils/randomutils"
+
 	"github.com/ethereum/go-ethereum/core/state"
+	ethstate "github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
 
 	"unsafe"
@@ -967,8 +969,15 @@ func (f *Fuzzer) prepareStateDataForGPU(state *state.StateDB) (*StateDataForGPU,
 		Accounts: make([]AccountDataForGPU, 0),
 	}
 
+	dumpConfig := &ethstate.DumpConfig{
+		SkipCode:          false,
+		SkipStorage:       false,
+		OnlyWithAddresses: false,
+		Start:             nil,
+		Max:               1000,
+	}
 	// Get raw state dump
-	stateDump := state.RawDump(nil)
+	stateDump := state.RawDump(dumpConfig)
 
 	stateData.Root = stateDump.Root
 
@@ -994,13 +1003,17 @@ func (f *Fuzzer) prepareStateDataForGPU(state *state.StateDB) (*StateDataForGPU,
 		if len(account.Code) > 0 && len(account.Code) < 1024*10 { // 10KB limit
 			accountData.Code = account.Code
 		}
+		// Print storage item count
+		fmt.Printf("Storage items for account %s: %d\n", addr, len(account.Storage))
 
 		// Add storage entries (limit number to prevent excessive data transfer)
 		storageLimit := 100
 		storageCount := 0
 		for key, value := range account.Storage {
-			fmt.Println("key: ", key.Hex(), "value: ", value)
+			// fmt.Println("key: ", key.Hex(), "value: ", value)
+			// fmt.Println("storage count ", storageCount)
 			if storageCount >= storageLimit {
+				fmt.Println("storage count limit reached")
 				break
 			}
 			accountData.StorageKeys = append(accountData.StorageKeys, key.Hex())
