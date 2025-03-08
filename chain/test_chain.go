@@ -126,7 +126,6 @@ func NewTestChain(
 		}
 		stateFactory = state.NewForkedStateFactory(provider)
 	} else {
-		fmt.Printf("Creating vanilla state factory\n")
 		stateFactory = state.NewVanillaStateFactory()
 		// stateFactory = state.NewUnbackedStateFactory()
 	}
