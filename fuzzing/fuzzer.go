@@ -731,6 +731,7 @@ func (f *Fuzzer) spawnWorkersLoop(baseTestChain *chain.TestChain) error {
 		if workersCancelled {
 			working = false
 		}
+		working = false
 	}
 
 	// Clean up workers
@@ -989,14 +990,23 @@ func (f *Fuzzer) prepareWorkersDataInParallel(baseTestChain *chain.TestChain) (b
 	return false, nil
 }
 
-// prepareStateDataForGPU extracts state data from the blockchain state for use in GPU operations
-func (f *Fuzzer) prepareStateDataForGPU(state *state.StateDB) (*StateDataForGPU, error) {
-	// Create our state data container
-	stateData := &StateDataForGPU{
-		Root:     "",
-		Accounts: make([]AccountDataForGPU, 0),
+// prepareAndProcessStateDataInGPU extracts state data from the blockchain state and sends it directly to the GPU
+func (f *Fuzzer) prepareAndProcessStateDataInGPU(state *state.StateDB) error {
+	fmt.Println("Go: Preparing and processing state data in GPU")
+
+	// Create a new state data container in C++
+	cStateData := C.create_state_data()
+	defer C.free_state_data(cStateData) // Ensure memory is freed
+
+	// Set state root - use the intermediate root hash
+	stateRoot := state.IntermediateRoot(false)
+	rootBytes := stateRoot.Bytes()
+	if len(rootBytes) > 0 {
+		cRoot := (*C.uchar)(unsafe.Pointer(&rootBytes[0]))
+		C.set_state_root(cStateData, cRoot, C.int(len(rootBytes)))
 	}
 
+	// Get raw state dump
 	dumpConfig := &ethstate.DumpConfig{
 		SkipCode:          false,
 		SkipStorage:       false,
@@ -1004,53 +1014,114 @@ func (f *Fuzzer) prepareStateDataForGPU(state *state.StateDB) (*StateDataForGPU,
 		Start:             nil,
 		Max:               1000,
 	}
-	// Get raw state dump
 	stateDump := state.RawDump(dumpConfig)
-
-	stateData.Root = stateDump.Root
 
 	// Process accounts (limit to most relevant accounts for GPU processing)
 	maxAccounts := 1000 // Adjust based on GPU memory constraints
 	count := 0
 
-	for addr, account := range stateDump.Accounts {
-		// Create account data structure
-		accountData := AccountDataForGPU{
-			Address:     addr,
-			Balance:     account.Balance,
-			Nonce:       account.Nonce,
-			Root:        account.Root,
-			CodeHash:    account.CodeHash,
-			HasCode:     len(account.Code) > 0,
-			CodeLength:  len(account.Code),
-			StorageKeys: make([]string, 0),
-			StorageVals: make([]string, 0),
+	for addrStr, account := range stateDump.Accounts {
+		// Convert address string to common.Address
+		addr, err := utils.HexStringToAddress(addrStr)
+		if err != nil {
+			continue
+		}
+
+		// Convert address to byte array
+		addrBytes := addr.Bytes()
+
+		// Convert balance string to big.Int
+		balanceBig := new(big.Int)
+		balanceBig.SetString(account.Balance, 10)
+		balanceBytes := balanceBig.Bytes()
+
+		// Convert byte slices to C arrays
+		var cAddr, cBalance, cRoot, cCodeHash, cCode *C.uchar
+		var addrLen, balanceLen, rootLen, codeHashLen, codeLen C.int
+
+		if len(addrBytes) > 0 {
+			cAddr = (*C.uchar)(unsafe.Pointer(&addrBytes[0]))
+			addrLen = C.int(len(addrBytes))
+		}
+
+		if len(balanceBytes) > 0 {
+			cBalance = (*C.uchar)(unsafe.Pointer(&balanceBytes[0]))
+			balanceLen = C.int(len(balanceBytes))
+		}
+
+		if len(account.Root) > 0 {
+			cRoot = (*C.uchar)(unsafe.Pointer(&account.Root[0]))
+			rootLen = C.int(len(account.Root))
+		}
+
+		if len(account.CodeHash) > 0 {
+			cCodeHash = (*C.uchar)(unsafe.Pointer(&account.CodeHash[0]))
+			codeHashLen = C.int(len(account.CodeHash))
 		}
 
 		// Only include code if it exists and isn't too large
-		if len(account.Code) > 0 && len(account.Code) < 1024*10 { // 10KB limit
-			accountData.Code = account.Code
+		if len(account.Code) > 0 && len(account.Code) < 1024*24 { // 24KB limit
+			cCode = (*C.uchar)(unsafe.Pointer(&account.Code[0]))
+			codeLen = C.int(len(account.Code))
 		}
-		// Print storage item count
-		fmt.Printf("Storage items for account %s: %d\n", addr, len(account.Storage))
 
-		// Add storage entries (limit number to prevent excessive data transfer)
-		storageLimit := 100
+		// Add the account
+		C.add_account(
+			cStateData,
+			cAddr, addrLen,
+			cBalance, balanceLen,
+			C.ulong(account.Nonce),
+			cRoot, rootLen,
+			cCodeHash, codeHashLen,
+			cCode, codeLen,
+			C.bool(len(account.Code) > 0),
+		)
+
+		// Add storage entries limit per account
+		storageLimit := 64
 		storageCount := 0
-		for key, value := range account.Storage {
-			// fmt.Println("key: ", key.Hex(), "value: ", value)
-			// fmt.Println("storage count ", storageCount)
+
+		for keyHash, valueStr := range account.Storage {
 			if storageCount >= storageLimit {
-				fmt.Println("storage count limit reached")
 				break
 			}
-			accountData.StorageKeys = append(accountData.StorageKeys, key.Hex())
-			accountData.StorageVals = append(accountData.StorageVals, value)
+
+			// Convert key hash to bytes
+			keyBytes := keyHash.Bytes()
+
+			// FIX: Properly convert the value string to uint256
+			// The values in storage are stored as hex strings with "0x" prefix
+			// We need to convert them properly to big.Int
+			valueBig := new(big.Int)
+
+			// Remove "0x" prefix if present
+			if strings.HasPrefix(valueStr, "0x") {
+				valueStr = valueStr[2:]
+			}
+
+			// Parse the hex string
+			valueBig.SetString(valueStr, 16)
+			valueBytes := valueBig.Bytes()
+
+			// Debug log showing the conversion
+			fmt.Println("Processing storage for account", addrStr, "key:", keyHash.Hex(), "raw value:", valueStr, "converted value:", valueBig.String())
+
+			var cKey, cValue *C.uchar
+			var keyLen, valueLen C.int
+
+			if len(keyBytes) > 0 {
+				cKey = (*C.uchar)(unsafe.Pointer(&keyBytes[0]))
+				keyLen = C.int(len(keyBytes))
+			}
+
+			if len(valueBytes) > 0 {
+				cValue = (*C.uchar)(unsafe.Pointer(&valueBytes[0]))
+				valueLen = C.int(len(valueBytes))
+			}
+
+			C.add_storage_entry(cStateData, cKey, keyLen, cValue, valueLen)
 			storageCount++
 		}
-
-		// Add to our accounts list
-		stateData.Accounts = append(stateData.Accounts, accountData)
 
 		count++
 		if count >= maxAccounts {
@@ -1058,27 +1129,15 @@ func (f *Fuzzer) prepareStateDataForGPU(state *state.StateDB) (*StateDataForGPU,
 		}
 	}
 
-	return stateData, nil
-}
+	// Process the state data in C++
+	result := C.process_state_data_gpu(cStateData)
 
-// StateDataForGPU contains blockchain state data formatted for passing to GPU
-type StateDataForGPU struct {
-	Root     string              `json:"root"`
-	Accounts []AccountDataForGPU `json:"accounts"`
-}
+	// Check the result if needed
+	if result != 0 {
+		return fmt.Errorf("C++ GPU processing returned error code: %d", result)
+	}
 
-// AccountDataForGPU contains account data formatted for passing to GPU
-type AccountDataForGPU struct {
-	Address     string   `json:"address"`
-	Balance     string   `json:"balance"`
-	Nonce       uint64   `json:"nonce"`
-	Root        []byte   `json:"root"`
-	CodeHash    []byte   `json:"codeHash"`
-	HasCode     bool     `json:"hasCode"`
-	Code        []byte   `json:"code,omitempty"`
-	CodeLength  int      `json:"codeLength"`
-	StorageKeys []string `json:"storageKeys"`
-	StorageVals []string `json:"storageVals"`
+	return nil
 }
 
 // Modified launchGPUKernel to include state data preparation and passing to C++
@@ -1089,12 +1148,9 @@ func (f *Fuzzer) launchGPUKernel() error {
 	if len(f.workers) > 0 && f.workers[0] != nil && f.workers[0].chain != nil {
 		tmp_state := f.workers[0].chain.State()
 		if stateDB, ok := tmp_state.(*state.StateDB); ok {
-			stateData, err := f.prepareStateDataForGPU(stateDB)
+			err := f.prepareAndProcessStateDataInGPU(stateDB)
 			if err != nil {
 				f.logger.Warn("Failed to prepare state data for GPU", err)
-			} else {
-				// Call the C++ function to process the state data
-				f.processStateDataInGPU(stateData)
 			}
 		}
 	}
@@ -1120,74 +1176,6 @@ func (f *Fuzzer) launchGPUKernel() error {
 	}
 
 	return nil
-}
-
-// processStateDataInGPU passes the state data to a C++ function for GPU processing
-func (f *Fuzzer) processStateDataInGPU(stateData *StateDataForGPU) {
-	fmt.Println("Go: Processing state data in GPU")
-	// Create a new state data container in C++
-	cStateData := C.create_state_data()
-	defer C.free_state_data(cStateData) // Ensure memory is freed
-
-	// Set state root
-	cStateRoot := C.CString(stateData.Root)
-	defer C.free(unsafe.Pointer(cStateRoot))
-	C.set_state_root(cStateData, cStateRoot)
-
-	// Add accounts
-	for _, account := range stateData.Accounts {
-		// Convert strings to C strings
-		cAddress := C.CString(account.Address)
-		cBalance := C.CString(account.Balance)
-
-		// Convert byte slices to C arrays
-		var cRoot, cCodeHash, cCode *C.uchar
-		var rootLen, codeHashLen, codeLen C.int
-
-		if len(account.Root) > 0 {
-			cRoot = (*C.uchar)(unsafe.Pointer(&account.Root[0]))
-			rootLen = C.int(len(account.Root))
-		}
-
-		if len(account.CodeHash) > 0 {
-			cCodeHash = (*C.uchar)(unsafe.Pointer(&account.CodeHash[0]))
-			codeHashLen = C.int(len(account.CodeHash))
-		}
-
-		if len(account.Code) > 0 {
-			cCode = (*C.uchar)(unsafe.Pointer(&account.Code[0]))
-			codeLen = C.int(len(account.Code))
-		}
-
-		// Add the account
-		C.add_account(
-			cStateData,
-			cAddress,
-			cBalance,
-			C.ulong(account.Nonce),
-			cRoot, rootLen,
-			cCodeHash, codeHashLen,
-			cCode, codeLen,
-		)
-
-		// Free C strings
-		C.free(unsafe.Pointer(cAddress))
-		C.free(unsafe.Pointer(cBalance))
-
-		// Add storage entries
-		for i := 0; i < len(account.StorageKeys); i++ {
-			cKey := C.CString(account.StorageKeys[i])
-			cValue := C.CString(account.StorageVals[i])
-
-			C.add_storage_entry(cStateData, cKey, cValue)
-
-			C.free(unsafe.Pointer(cKey))
-			C.free(unsafe.Pointer(cValue))
-		}
-	}
-
-	// Process the state data in C++
-	C.process_state_data_gpu(cStateData)
 }
 
 // processWorkersResultsInParallel handles all post-processing logic in parallel
