@@ -126,6 +126,7 @@ func NewTestChain(
 		}
 		stateFactory = state.NewForkedStateFactory(provider)
 	} else {
+		fmt.Printf("Creating vanilla state factory\n")
 		stateFactory = state.NewVanillaStateFactory()
 		// stateFactory = state.NewUnbackedStateFactory()
 	}
@@ -201,7 +202,8 @@ func newTestChainWithStateFactory(
 	// Create an in-memory database
 	db := rawdb.NewMemoryDatabase()
 	dbConfig := &triedb.Config{
-		HashDB: hashdb.Defaults,
+		Preimages: true,
+		HashDB:    hashdb.Defaults,
 		// TODO	Add cleanCacheSize of 256 depending on the resolution of this issue https://github.com/ethereum/go-ethereum/issues/30099
 		// PathDB: pathdb.Defaults,
 	}
