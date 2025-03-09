@@ -1,6 +1,7 @@
 module github.com/crytic/medusa
 
 go 1.22
+toolchain go1.23.7
 
 require (
 	github.com/Masterminds/semver v1.5.0
@@ -18,7 +19,7 @@ require (
 	golang.org/x/crypto v0.32.0
 	golang.org/x/exp v0.0.0-20240707233637-46b078467d37
 	golang.org/x/net v0.34.0
-	golang.org/x/sys v0.29.0
+	golang.org/x/sys v0.31.0
 )
 
 require (
