@@ -48,10 +48,30 @@ import (
 )
 
 /*
-#cgo CFLAGS: -I${SRCDIR}/gpu
-#cgo LDFLAGS: -L${SRCDIR}/gpu -lstategpu -Wl,-rpath,${SRCDIR}/gpu
-#include "state_gpu.h"
+#cgo CFLAGS: -I${SRCDIR}/../../CuEVM-internal
+#cgo LDFLAGS: -L${SRCDIR}/../../CuEVM-internal/build -lcuevm_go -Wl,-rpath,${SRCDIR}/../../CuEVM-internal/build
 #include <stdlib.h>
+#include <stdbool.h>
+
+// CuEVM Go interface functions
+void* create_state_data();
+void set_state_root(void* state, const unsigned char* root, int root_len);
+void add_account(void* state,
+                 const unsigned char* addr, int addr_len,
+                 const unsigned char* balance, int balance_len,
+                 unsigned long nonce,
+                 const unsigned char* root, int root_len,
+                 const unsigned char* code_hash, int code_hash_len,
+                 const unsigned char* code, int code_len,
+                 bool has_code);
+void add_storage_entry(void* state,
+                       const unsigned char* key, int key_len,
+                       const unsigned char* value, int value_len);
+int process_state_data_gpu(void* state);
+void free_state_data(void* state);
+int run_interpreter_go(const char* json_input, unsigned int skip_trace_parsing,
+                       unsigned int copy_state_data, unsigned int reuse_state_data);
+int get_call_count();
 */
 import "C"
 
@@ -966,17 +986,14 @@ func (f *Fuzzer) prepareWorkersDataInParallel(baseTestChain *chain.TestChain) (b
 func (f *Fuzzer) prepareAndProcessStateDataInGPU(state *state.StateDB) error {
 	fmt.Println("Go: Preparing and processing state data in GPU")
 
-	// Create a new state data container in C++
-	cStateData := C.create_state_data()
-	defer C.free_state_data(cStateData) // Ensure memory is freed
+	// Create a state data container
+	stateData := C.create_state_data()
+	defer C.free_state_data(stateData)
 
-	// Set state root - use the intermediate root hash
-	stateRoot := state.IntermediateRoot(false)
-	rootBytes := stateRoot.Bytes()
-	if len(rootBytes) > 0 {
-		cRoot := (*C.uchar)(unsafe.Pointer(&rootBytes[0]))
-		C.set_state_root(cStateData, cRoot, C.int(len(rootBytes)))
-	}
+	// Set the state root
+	rootBytes := state.IntermediateRoot(false).Bytes()
+	rootPtr := (*C.uchar)(&rootBytes[0])
+	C.set_state_root(stateData, rootPtr, C.int(len(rootBytes)))
 
 	// Get raw state dump
 	dumpConfig := &ethstate.DumpConfig{
@@ -1039,7 +1056,7 @@ func (f *Fuzzer) prepareAndProcessStateDataInGPU(state *state.StateDB) error {
 
 		// Add the account
 		C.add_account(
-			cStateData,
+			stateData,
 			cAddr, addrLen,
 			cBalance, balanceLen,
 			C.ulong(account.Nonce),
@@ -1091,7 +1108,7 @@ func (f *Fuzzer) prepareAndProcessStateDataInGPU(state *state.StateDB) error {
 				valueLen = C.int(len(valueBytes))
 			}
 
-			C.add_storage_entry(cStateData, cKey, keyLen, cValue, valueLen)
+			C.add_storage_entry(stateData, cKey, keyLen, cValue, valueLen)
 			storageCount++
 		}
 
@@ -1102,7 +1119,7 @@ func (f *Fuzzer) prepareAndProcessStateDataInGPU(state *state.StateDB) error {
 	}
 
 	// Process the state data in C++
-	result := C.process_state_data_gpu(cStateData)
+	result := C.process_state_data_gpu(stateData)
 
 	// Check the result if needed
 	if result != 0 {
