@@ -27,11 +27,13 @@ import (
 	"github.com/crytic/medusa/fuzzing/calls"
 	"github.com/crytic/medusa/utils/randomutils"
 
-	"github.com/ethereum/go-ethereum/core/state"
 	ethstate "github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
 
 	"unsafe"
+
+	"encoding/hex"
+	"encoding/json"
 
 	"github.com/crytic/medusa/chain"
 	compilationTypes "github.com/crytic/medusa/compilation/types"
@@ -48,30 +50,23 @@ import (
 )
 
 /*
-#cgo CFLAGS: -I${SRCDIR}/../../CuEVM-internal
+#cgo CFLAGS: -I${SRCDIR}/../../CuEVM-internal  -I${SRCDIR}/../../CuEVM-internal/CuEVM/include
 #cgo LDFLAGS: -L${SRCDIR}/../../CuEVM-internal/build -lcuevm_go -Wl,-rpath,${SRCDIR}/../../CuEVM-internal/build
 #include <stdlib.h>
 #include <stdbool.h>
+#include <stdint.h>
 
-// CuEVM Go interface functions
-void* create_state_data();
-void set_state_root(void* state, const unsigned char* root, int root_len);
-void add_account(void* state,
-                 const unsigned char* addr, int addr_len,
-                 const unsigned char* balance, int balance_len,
-                 unsigned long nonce,
-                 const unsigned char* root, int root_len,
-                 const unsigned char* code_hash, int code_hash_len,
-                 const unsigned char* code, int code_len,
-                 bool has_code);
-void add_storage_entry(void* state,
-                       const unsigned char* key, int key_len,
-                       const unsigned char* value, int value_len);
-int process_state_data_gpu(void* state);
-void free_state_data(void* state);
-int run_interpreter_go(const char* json_input, unsigned int skip_trace_parsing,
-                       unsigned int copy_state_data, unsigned int reuse_state_data);
-int get_call_count();
+// Only declare the functions that are actually implemented
+int run_interpreter_go(const char* json_input, uint32_t skip_trace_parsing, uint32_t copy_state_data,
+                       uint32_t reuse_state_data);
+int process_json_state_gpu(const char* json_state, uint32_t num_instances);
+int process_batch_transactions(const unsigned char* fromAddr,
+                             const unsigned char* toAddr,
+                             const unsigned char* values,
+                             const unsigned char* callData, int callDataLen,
+                             const uint32_t* dataOffsets, int dataOffsetsLen,
+                             const uint32_t* dataSizes, int dataSizesLen,
+                             int txCount);
 */
 import "C"
 
@@ -982,169 +977,280 @@ func (f *Fuzzer) prepareWorkersDataInParallel(baseTestChain *chain.TestChain) (b
 	return false, nil
 }
 
-// prepareAndProcessStateDataInGPU extracts state data from the blockchain state and sends it directly to the GPU
-func (f *Fuzzer) prepareAndProcessStateDataInGPU(state *state.StateDB) error {
-	fmt.Println("Go: Preparing and processing state data in GPU")
+// prepareAndProcessTransactionDataInGPU extracts transaction data from call sequence elements and sends it to the GPU
+func (f *Fuzzer) runTransactionsGPU(callSequenceElements []*calls.CallSequenceElement) error {
+	fmt.Println("\nGo: Preparing transaction data in batch for GPU processing worker\n")
 
-	// Create a state data container
-	stateData := C.create_state_data()
-	defer C.free_state_data(stateData)
-
-	// Set the state root
-	rootBytes := state.IntermediateRoot(false).Bytes()
-	rootPtr := (*C.uchar)(&rootBytes[0])
-	C.set_state_root(stateData, rootPtr, C.int(len(rootBytes)))
-
-	// Get raw state dump
-	dumpConfig := &ethstate.DumpConfig{
-		SkipCode:          false,
-		SkipStorage:       false,
-		OnlyWithAddresses: false,
-		Start:             nil,
-		Max:               1000,
+	// Count valid call elements first
+	validCallCount := 0
+	for _, element := range callSequenceElements {
+		if element.Call != nil {
+			validCallCount++
+		}
 	}
-	stateDump := state.RawDump(dumpConfig)
 
-	// Process accounts (limit to most relevant accounts for GPU processing)
-	maxAccounts := 1000 // Adjust based on GPU memory constraints
-	count := 0
+	if validCallCount == 0 {
+		return nil // Nothing to process
+	}
 
-	for addrStr, account := range stateDump.Accounts {
-		// Convert address string to common.Address
-		addr, err := utils.HexStringToAddress(addrStr)
-		if err != nil {
-			continue
-		}
+	// Use fixed from and to addresses (32 bytes each)
+	fromAddr := make([]byte, 32)
+	toAddr := make([]byte, 32)
 
-		// Convert address to byte array
-		addrBytes := addr.Bytes()
+	// Use first valid call element for from/to addresses
+	for _, element := range callSequenceElements {
+		if element.Call != nil {
+			// Copy from address (right-padded to 32 bytes)
+			copy(fromAddr[12:], element.Call.From.Bytes()) // Ethereum addresses are 20 bytes
 
-		// Convert balance string to big.Int
-		balanceBig := new(big.Int)
-		balanceBig.SetString(account.Balance, 10)
-		balanceBytes := balanceBig.Bytes()
-
-		// Convert byte slices to C arrays
-		var cAddr, cBalance, cRoot, cCodeHash, cCode *C.uchar
-		var addrLen, balanceLen, rootLen, codeHashLen, codeLen C.int
-
-		if len(addrBytes) > 0 {
-			cAddr = (*C.uchar)(unsafe.Pointer(&addrBytes[0]))
-			addrLen = C.int(len(addrBytes))
-		}
-
-		if len(balanceBytes) > 0 {
-			cBalance = (*C.uchar)(unsafe.Pointer(&balanceBytes[0]))
-			balanceLen = C.int(len(balanceBytes))
-		}
-
-		if len(account.Root) > 0 {
-			cRoot = (*C.uchar)(unsafe.Pointer(&account.Root[0]))
-			rootLen = C.int(len(account.Root))
-		}
-
-		if len(account.CodeHash) > 0 {
-			cCodeHash = (*C.uchar)(unsafe.Pointer(&account.CodeHash[0]))
-			codeHashLen = C.int(len(account.CodeHash))
-		}
-
-		// Only include code if it exists and isn't too large
-		if len(account.Code) > 0 && len(account.Code) < 1024*24 { // 24KB limit
-			cCode = (*C.uchar)(unsafe.Pointer(&account.Code[0]))
-			codeLen = C.int(len(account.Code))
-		}
-
-		// Add the account
-		C.add_account(
-			stateData,
-			cAddr, addrLen,
-			cBalance, balanceLen,
-			C.ulong(account.Nonce),
-			cRoot, rootLen,
-			cCodeHash, codeHashLen,
-			cCode, codeLen,
-			C.bool(len(account.Code) > 0),
-		)
-
-		// Add storage entries limit per account
-		storageLimit := 64
-		storageCount := 0
-
-		for keyHash, valueStr := range account.Storage {
-			if storageCount >= storageLimit {
-				break
+			// Copy to address (right-padded to 32 bytes)
+			if element.Call.To != nil {
+				copy(toAddr[12:], element.Call.To.Bytes())
 			}
-
-			// Convert key hash to bytes
-			keyBytes := keyHash.Bytes()
-
-			// FIX: Properly convert the value string to uint256
-			// The values in storage are stored as hex strings with "0x" prefix
-			// We need to convert them properly to big.Int
-			valueBig := new(big.Int)
-
-			// Remove "0x" prefix if present
-			if strings.HasPrefix(valueStr, "0x") {
-				valueStr = valueStr[2:]
-			}
-
-			// Parse the hex string
-			valueBig.SetString(valueStr, 16)
-			valueBytes := valueBig.Bytes()
-
-			// Debug log showing the conversion
-			fmt.Println("Processing storage for account", addrStr, "key:", keyHash.Hex(), "raw value:", valueStr, "converted value:", valueBig.String())
-
-			var cKey, cValue *C.uchar
-			var keyLen, valueLen C.int
-
-			if len(keyBytes) > 0 {
-				cKey = (*C.uchar)(unsafe.Pointer(&keyBytes[0]))
-				keyLen = C.int(len(keyBytes))
-			}
-
-			if len(valueBytes) > 0 {
-				cValue = (*C.uchar)(unsafe.Pointer(&valueBytes[0]))
-				valueLen = C.int(len(valueBytes))
-			}
-
-			C.add_storage_entry(stateData, cKey, keyLen, cValue, valueLen)
-			storageCount++
-		}
-
-		count++
-		if count >= maxAccounts {
 			break
 		}
 	}
 
-	// Process the state data in C++
-	result := C.process_state_data_gpu(stateData)
+	// Pre-allocate value array
+	values := make([]byte, validCallCount*32) // 32 bytes for each uint256
 
-	// Check the result if needed
+	// For data we need two arrays - the data itself and offsets
+	// First pass to calculate total data size
+	totalDataSize := 0
+	for _, element := range callSequenceElements {
+		if element.Call != nil {
+			totalDataSize += len(element.Call.Data)
+		}
+	}
+
+	callData := make([]byte, totalDataSize)
+	dataOffsets := make([]uint32, validCallCount)
+	dataSizes := make([]uint32, validCallCount)
+
+	// Fill arrays from call elements
+	idx := 0
+	dataOffset := 0
+	for _, element := range callSequenceElements {
+		if element.Call == nil {
+			continue
+		}
+
+		call := element.Call
+
+		// Copy value (big-endian)
+		valueBytes := call.Value.Bytes()
+		copy(values[idx*32+32-len(valueBytes):idx*32+32], valueBytes)
+
+		// Handle call data
+		if len(call.Data) > 0 {
+			copy(callData[dataOffset:], call.Data)
+			dataOffsets[idx] = uint32(dataOffset)
+			dataSizes[idx] = uint32(len(call.Data))
+			dataOffset += len(call.Data)
+		}
+
+		idx++
+	}
+
+	// Call C function with simplified arrays
+	result := C.process_batch_transactions(
+		(*C.uchar)(unsafe.Pointer(&fromAddr[0])),
+		(*C.uchar)(unsafe.Pointer(&toAddr[0])),
+		(*C.uchar)(unsafe.Pointer(&values[0])),
+		(*C.uchar)(unsafe.Pointer(&callData[0])), C.int(len(callData)),
+		(*C.uint)(unsafe.Pointer(&dataOffsets[0])), C.int(len(dataOffsets)),
+		(*C.uint)(unsafe.Pointer(&dataSizes[0])), C.int(len(dataSizes)),
+		C.int(validCallCount),
+	)
+
 	if result != 0 {
-		return fmt.Errorf("C++ GPU processing returned error code: %d", result)
+		return fmt.Errorf("GPU transaction processing returned error code: %d", result)
 	}
 
 	return nil
 }
 
-// Modified launchGPUKernel to include state data preparation and passing to C++
+// prepareAndProcessChainStateInGPU extracts the chain state and block header information and sends it to the GPU
+func (f *Fuzzer) prepareAndProcessChainStateInGPU(testChain *chain.TestChain) error {
+	fmt.Println("Go: Preparing and processing chain state data in GPU")
+
+	// Get the current state from the chain
+	state := testChain.State()
+	eth_state, ok := state.(*ethstate.StateDB)
+
+	if state == nil || !ok {
+		return fmt.Errorf("chain state is nil")
+	}
+
+	// Get raw state dump
+	dumpConfig := &ethstate.DumpConfig{
+		SkipCode:    false,
+		SkipStorage: false,
+
+		OnlyWithAddresses: false,
+		Start:             nil,
+		Max:               1000,
+	}
+	stateDump := eth_state.RawDump(dumpConfig)
+
+	// Convert state dump to JSON format
+	stateJSON := convertStateToJSON(&stateDump, testChain.Head().Header)
+
+	// Call C function to process the JSON state
+	cJSON := C.CString(stateJSON)
+	defer C.free(unsafe.Pointer(cJSON))
+
+	result := C.process_json_state_gpu(cJSON, C.uint(len(f.workers)))
+
+	// Check the result
+	if result != 0 {
+		return fmt.Errorf("C++ GPU state processing returned error code: %d", result)
+	}
+
+	return nil
+}
+
+// convertStateToJSON converts a state dump to JSON string compatible with CuEVM's expected format
+func convertStateToJSON(stateDump *ethstate.Dump, blockHeader *types.Header) string {
+	// Create a map for the "pre" state format
+	preState := make(map[string]map[string]interface{})
+
+	for addrStr, account := range stateDump.Accounts {
+		// Create account object
+		accountMap := make(map[string]interface{})
+
+		// Convert balance to hex format
+		balanceBig := new(big.Int)
+		balanceBig.SetString(account.Balance, 10)
+		accountMap["balance"] = "0x" + balanceBig.Text(16)
+
+		// Add nonce
+		accountMap["nonce"] = fmt.Sprintf("0x%x", account.Nonce)
+
+		// Add code if it exists
+		if len(account.Code) > 0 {
+			accountMap["code"] = "0x" + hex.EncodeToString(account.Code)
+		} else {
+			accountMap["code"] = "0x"
+		}
+
+		// Add storage if it exists
+		if len(account.Storage) > 0 {
+			storage := make(map[string]string)
+			for key, value := range account.Storage {
+				// Remove "0x" prefix if present in value
+				if strings.HasPrefix(value, "0x") {
+					value = value[2:]
+				}
+
+				// Store as "0x..." format
+				storage["0x"+hex.EncodeToString(key.Bytes())] = "0x" + value
+			}
+			accountMap["storage"] = storage
+		} else {
+			accountMap["storage"] = make(map[string]string)
+		}
+
+		// Add to pre state
+		preState[addrStr] = accountMap
+	}
+
+	// Create the final structure including env information
+	stateStruct := map[string]interface{}{
+		"pre": preState,
+	}
+
+	// Add block header information if available
+	if blockHeader != nil {
+		// Create env section with block header data
+		envMap := make(map[string]interface{})
+
+		// Format all values as hex strings
+		envMap["currentCoinbase"] = "0x" + blockHeader.Coinbase.Hex()[2:]
+		envMap["currentTimestamp"] = fmt.Sprintf("0x%x", blockHeader.Time)
+		envMap["currentNumber"] = "0x" + blockHeader.Number.Text(16)
+		envMap["currentDifficulty"] = "0x" + blockHeader.Difficulty.Text(16)
+		envMap["currentGasLimit"] = fmt.Sprintf("0x%x", blockHeader.GasLimit)
+
+		// Add default values for fields not in the go-ethereum header
+		envMap["currentBaseFee"] = "0x0a" // Default base fee
+
+		// Add prevrandao if available (for post-merge chains)
+		// In go-ethereum this is stored in the mixHash field after the merge
+		envMap["currentRandom"] = "0x" + hex.EncodeToString(blockHeader.MixDigest.Bytes())
+
+		// Add default chain ID (typically 1 for mainnet)
+		envMap["chainId"] = "0x1"
+
+		// Add environment to state structure
+		stateStruct["env"] = envMap
+	}
+
+	// Marshal to JSON
+	jsonBytes, err := json.MarshalIndent(stateStruct, "", "  ")
+	if err != nil {
+		return "{}"
+	}
+
+	return string(jsonBytes)
+}
+
+// launchGPUKernel modification to handle chain state properly
 func (f *Fuzzer) launchGPUKernel() error {
 	f.logger.Info("Launching GPU kernel to execute call sequences with prepared element lists")
 
-	// Get state data from our base test chain for GPU processing
+	// Process state data from our base test chain for GPU processing
 	if len(f.workers) > 0 && f.workers[0] != nil && f.workers[0].chain != nil {
-		tmp_state := f.workers[0].chain.State()
-		if stateDB, ok := tmp_state.(*state.StateDB); ok {
-			err := f.prepareAndProcessStateDataInGPU(stateDB)
-			if err != nil {
-				f.logger.Warn("Failed to prepare state data for GPU", err)
-			}
+		err := f.prepareAndProcessChainStateInGPU(f.workers[0].chain)
+		if err != nil {
+			f.logger.Warn("Failed to prepare state data for GPU", err)
 		}
 	}
 
-	// Existing simulation code
+	// loop and print data
+	fmt.Println("call data before GPU")
+	for i := 0; i < len(f.workers); i++ {
+		worker := f.workers[i]
+		fmt.Println("worker: ", i)
+		for _, element := range worker.callSequenceElements {
+			fmt.Println("from: ", element.Call.From)
+			fmt.Println("to: ", element.Call.To)
+			fmt.Println("value: ", element.Call.Value)
+			fmt.Println("gas limit: ", element.Call.GasLimit)
+			fmt.Println("gas price: ", element.Call.GasPrice)
+			fmt.Println("nonce: ", element.Call.Nonce)
+			fmt.Printf("data: %x\n", element.Call.Data)
+			fmt.Println("--------------------------------")
+		}
+
+		// run in GPU
+		// Process transaction data in GPU
+	}
+	// Process one element at a time from each worker
+	for elementIdx := 0; elementIdx < len(f.workers[0].callSequenceElements); elementIdx++ {
+		// Collect one element from each worker that has an element at this index
+		elementsToProcess := make([]*calls.CallSequenceElement, 0)
+
+		for workerIdx := 0; workerIdx < len(f.workers); workerIdx++ {
+			worker := f.workers[workerIdx]
+			if worker != nil && elementIdx < len(worker.callSequenceElements) {
+				elementsToProcess = append(elementsToProcess, worker.callSequenceElements[elementIdx])
+			}
+		}
+
+		// If we collected any elements, process them
+		if len(elementsToProcess) > 0 {
+			err := f.runTransactionsGPU(elementsToProcess)
+			if err != nil {
+				f.logger.Warn(fmt.Sprintf("Failed to process transaction data for element index %d in GPU", elementIdx), err)
+			}
+		}
+		// debugging
+		fmt.Println("end of GPU processing")
+		return nil
+	}
+	fmt.Println("\n end printing call data before GPU \n")
+	// Now process transaction data for each worker
 	for i := 0; i < len(f.workers); i++ {
 		worker := f.workers[i]
 		if worker == nil || worker.chain == nil {
@@ -1156,7 +1262,7 @@ func (f *Fuzzer) launchGPUKernel() error {
 			break
 		}
 
-		// Execute the call sequence using the prepared list of elements
+		// Execute the call sequence using the prepared list of elements (keeping existing code)
 		_, worker.lastExecutionError = calls.SimulateExecuteCallSequenceGPUWithList(
 			worker.chain,
 			worker.callSequenceElements,
