@@ -1,6 +1,11 @@
 package coverage
 
 import (
+	"encoding/json"
+	"fmt"
+	"math/bits"
+	"sort"
+
 	"golang.org/x/exp/slices"
 
 	"sync"
@@ -170,13 +175,44 @@ func (cm *CoverageMaps) Update(coverageMaps *CoverageMaps) (bool, bool, error) {
 	return successCoverageChanged, revertedCoverageChanged, nil
 }
 
+// for debugging
+// MarshalJSON implements custom JSON marshaling for CoverageMaps
+func (cm *CoverageMaps) MarshalJSON() ([]byte, error) {
+	// Acquire lock to ensure thread safety
+	cm.updateLock.Lock()
+	defer cm.updateLock.Unlock()
+
+	// Create a simplified representation for JSON serialization
+	type MapEntry struct {
+		CodeHash  string                          `json:"codeHash"`
+		Addresses map[string]*ContractCoverageMap `json:"addresses"`
+	}
+
+	result := make([]MapEntry, 0, len(cm.maps))
+
+	for hash, addrMap := range cm.maps {
+		entry := MapEntry{
+			CodeHash:  hash.Hex(),
+			Addresses: make(map[string]*ContractCoverageMap),
+		}
+
+		for addr, coverageMap := range addrMap {
+			entry.Addresses[addr.Hex()] = coverageMap
+		}
+
+		result = append(result, entry)
+	}
+
+	return json.Marshal(result)
+}
+
 // UpdateAt updates the hit count of a given program counter location within code coverage data.
 func (cm *CoverageMaps) UpdateAt(codeAddress common.Address, codeLookupHash common.Hash, codeSize int, pc uint64) (bool, error) {
 	// If the code size is zero, do nothing
 	if codeSize == 0 {
 		return false, nil
 	}
-
+	fmt.Println("updateAt codeAddress: ", codeAddress, " codeLookupHash: ", codeLookupHash, " codeSize: ", codeSize, " pc: ", pc)
 	// Define variables used to update coverage maps and track changes.
 	var (
 		addedNewMap  bool
@@ -286,14 +322,94 @@ func (cm *CoverageMaps) UniquePCs() uint64 {
 	return uniquePCs
 }
 
+// MarshalJSON implements custom JSON marshaling for CoverageMapBytecodeData
+func (c *CoverageMapBytecodeData) MarshalJSON() ([]byte, error) {
+	if c == nil {
+		return []byte("null"), nil
+	}
+
+	// Define a struct for PC and hit count pairs
+	type PCHitCount struct {
+		PC       uint `json:"pc"`
+		HitCount uint `json:"hitCount"`
+	}
+
+	// Collect all PCs with non-zero hit counts
+	var executedPCs []PCHitCount
+	for pc, hitCount := range c.executedFlags {
+		if hitCount > 0 {
+			executedPCs = append(executedPCs, PCHitCount{
+				PC:       uint(pc),
+				HitCount: hitCount,
+			})
+		}
+	}
+
+	// Sort by PC in ascending order
+	sort.Slice(executedPCs, func(i, j int) bool {
+		return executedPCs[i].PC < executedPCs[j].PC
+	})
+
+	type Representation struct {
+		ExecutedPCs []PCHitCount `json:"executedPCs"`
+	}
+
+	rep := Representation{
+		ExecutedPCs: executedPCs,
+	}
+
+	return json.Marshal(rep)
+}
+
 // ContractCoverageMap represents a data structure used to identify instruction execution coverage of a contract.
 type ContractCoverageMap struct {
 	// successfulCoverage represents coverage for the contract bytecode, which did not encounter a revert and was
 	// deemed successful.
-	successfulCoverage *CoverageMapBytecodeData
+	successfulCoverage *CoverageMapBytecodeData `json:"successfulCoverage"`
 
 	// revertedCoverage represents coverage for the contract bytecode, which encountered a revert.
-	revertedCoverage *CoverageMapBytecodeData
+	revertedCoverage *CoverageMapBytecodeData `json:"revertedCoverage"`
+}
+
+// MarshalJSON implements custom JSON marshaling for ContractCoverageMap
+func (cm *ContractCoverageMap) MarshalJSON() ([]byte, error) {
+	type Representation struct {
+		SuccessfulCoverage    *CoverageMapBytecodeData `json:"successfulCoverage"`
+		RevertedCoverage      *CoverageMapBytecodeData `json:"revertedCoverage"`
+		TotalPCsHitSuccessful int                      `json:"totalPCsHitSuccessful"`
+		TotalPCsHitReverted   int                      `json:"totalPCsHitReverted"`
+	}
+
+	// Count total PCs hit
+	totalPCsHitSuccessful := 0
+	totalPCsHitReverted := 0
+
+	successfulCoverage := cm.successfulCoverage
+	revertedCoverage := cm.revertedCoverage
+
+	// Calculate total PCs hit from both coverages
+	if successfulCoverage != nil {
+		for _, flag := range successfulCoverage.executedFlags {
+			// Count bits set in the flag
+			totalPCsHitSuccessful += bits.OnesCount64(uint64(flag))
+		}
+	}
+
+	if revertedCoverage != nil {
+		for _, flag := range revertedCoverage.executedFlags {
+			// Count bits set in the flag
+			totalPCsHitReverted += bits.OnesCount64(uint64(flag))
+		}
+	}
+
+	rep := Representation{
+		SuccessfulCoverage:    successfulCoverage,
+		RevertedCoverage:      revertedCoverage,
+		TotalPCsHitSuccessful: totalPCsHitSuccessful,
+		TotalPCsHitReverted:   totalPCsHitReverted,
+	}
+
+	return json.Marshal(rep)
 }
 
 // newContractCoverageMap creates and returns a new ContractCoverageMap.
@@ -340,7 +456,7 @@ func (cm *ContractCoverageMap) updateCoveredAt(codeSize int, pc uint64) (bool, e
 // CoverageMapBytecodeData represents a data structure used to identify instruction execution coverage of some init
 // or runtime bytecode.
 type CoverageMapBytecodeData struct {
-	executedFlags []uint
+	executedFlags []uint `json:"executedFlags"`
 }
 
 // Reset resets the bytecode coverage map data to be empty.

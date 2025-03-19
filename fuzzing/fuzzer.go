@@ -59,14 +59,13 @@ import (
 // Only declare the functions that are actually implemented
 int run_interpreter_go(const char* json_input, uint32_t skip_trace_parsing, uint32_t copy_state_data,
                        uint32_t reuse_state_data);
+// Updated function declaration with reuse_state_data parameter
+int process_batch_transactions(const unsigned char* fromAddr, const unsigned char* toAddr, const unsigned char* values,
+                               const unsigned char* callData, int callDataLen, const uint32_t* dataOffsets,
+                               int dataOffsetsLen, const uint32_t* dataSizes, int dataSizesLen, int txCount);
+
+// Updated function declaration with reset_state parameter
 int process_json_state_gpu(const char* json_state, uint32_t num_instances);
-int process_batch_transactions(const unsigned char* fromAddr,
-                             const unsigned char* toAddr,
-                             const unsigned char* values,
-                             const unsigned char* callData, int callDataLen,
-                             const uint32_t* dataOffsets, int dataOffsetsLen,
-                             const uint32_t* dataSizes, int dataSizesLen,
-                             int txCount);
 */
 import "C"
 
@@ -690,7 +689,7 @@ func (f *Fuzzer) spawnWorkersLoop(baseTestChain *chain.TestChain) error {
 			return err
 		}
 	}
-
+	counter := 0
 	// Main processing loop
 	working := true
 	for working && !utils.CheckContextDone(f.ctx) {
@@ -718,7 +717,11 @@ func (f *Fuzzer) spawnWorkersLoop(baseTestChain *chain.TestChain) error {
 		if workersCancelled {
 			working = false
 		}
-		working = false
+		counter++
+		if counter > 10 {
+			working = false
+		}
+		// working = false
 	}
 
 	// Clean up workers
@@ -877,6 +880,7 @@ func (f *Fuzzer) prepareWorkersDataInParallel(baseTestChain *chain.TestChain) (b
 				// Get the decoded return values and add it to the base value set
 				// Don't throw an error since we care more about coverage than adding the return values to the base value set
 				decodedReturnValues, err := latestCallSequenceElement.DecodedReturnValues()
+				fmt.Println("executionCheckFunc decodedReturnValues", decodedReturnValues)
 				if decodedReturnValues != nil && err == nil {
 					worker.valueSet.Add(decodedReturnValues)
 				}
@@ -891,10 +895,13 @@ func (f *Fuzzer) prepareWorkersDataInParallel(baseTestChain *chain.TestChain) (b
 				// Loop through each test function, signal our worker tested a call, and collect any requests to shrink
 				// this call sequence.
 				for _, callSequenceTestFunc := range f.Hooks.CallSequenceTestFuncs {
+
+					fmt.Println("currentlyExecutedSequence", currentlyExecutedSequence)
 					newShrinkRequests, err := callSequenceTestFunc(worker, currentlyExecutedSequence)
 					if err != nil {
 						return true, err
 					}
+					fmt.Println("newShrinkRequests", newShrinkRequests)
 					worker.pendingShrinkRequests = append(worker.pendingShrinkRequests, newShrinkRequests...)
 				}
 
@@ -1200,56 +1207,53 @@ func (f *Fuzzer) launchGPUKernel() error {
 	f.logger.Info("Launching GPU kernel to execute call sequences with prepared element lists")
 
 	// Process state data from our base test chain for GPU processing
-	if len(f.workers) > 0 && f.workers[0] != nil && f.workers[0].chain != nil {
-		err := f.prepareAndProcessChainStateInGPU(f.workers[0].chain)
-		if err != nil {
-			f.logger.Warn("Failed to prepare state data for GPU", err)
-		}
-	}
+	// if len(f.workers) > 0 && f.workers[0] != nil && f.workers[0].chain != nil {
+	// 	err := f.prepareAndProcessChainStateInGPU(f.workers[0].chain)
+	// 	if err != nil {
+	// 		f.logger.Warn("Failed to prepare state data for GPU", err)
+	// 	}
+	// }
 
-	// loop and print data
-	fmt.Println("call data before GPU")
-	for i := 0; i < len(f.workers); i++ {
-		worker := f.workers[i]
-		fmt.Println("worker: ", i)
-		for _, element := range worker.callSequenceElements {
-			fmt.Println("from: ", element.Call.From)
-			fmt.Println("to: ", element.Call.To)
-			fmt.Println("value: ", element.Call.Value)
-			fmt.Println("gas limit: ", element.Call.GasLimit)
-			fmt.Println("gas price: ", element.Call.GasPrice)
-			fmt.Println("nonce: ", element.Call.Nonce)
-			fmt.Printf("data: %x\n", element.Call.Data)
-			fmt.Println("--------------------------------")
-		}
+	// // loop and print data
+	// fmt.Println("call data before GPU")
+	// for i := 0; i < len(f.workers); i++ {
+	// 	worker := f.workers[i]
+	// 	fmt.Println("worker: ", i)
+	// 	for _, element := range worker.callSequenceElements {
+	// 		fmt.Println("from: ", element.Call.From)
+	// 		fmt.Println("to: ", element.Call.To)
+	// 		fmt.Println("value: ", element.Call.Value)
+	// 		fmt.Println("gas limit: ", element.Call.GasLimit)
+	// 		fmt.Println("gas price: ", element.Call.GasPrice)
+	// 		fmt.Println("nonce: ", element.Call.Nonce)
+	// 		fmt.Printf("data: %x\n", element.Call.Data)
+	// 		fmt.Println("--------------------------------")
+	// 	}
 
-		// run in GPU
-		// Process transaction data in GPU
-	}
+	// 	// run in GPU
+	// 	// Process transaction data in GPU
+	// }
 	// Process one element at a time from each worker
-	for elementIdx := 0; elementIdx < len(f.workers[0].callSequenceElements); elementIdx++ {
-		// Collect one element from each worker that has an element at this index
-		elementsToProcess := make([]*calls.CallSequenceElement, 0)
+	// for elementIdx := 0; elementIdx < len(f.workers[0].callSequenceElements); elementIdx++ {
+	// 	// Collect one element from each worker that has an element at this index
+	// 	elementsToProcess := make([]*calls.CallSequenceElement, 0)
 
-		for workerIdx := 0; workerIdx < len(f.workers); workerIdx++ {
-			worker := f.workers[workerIdx]
-			if worker != nil && elementIdx < len(worker.callSequenceElements) {
-				elementsToProcess = append(elementsToProcess, worker.callSequenceElements[elementIdx])
-			}
-		}
+	// 	for workerIdx := 0; workerIdx < len(f.workers); workerIdx++ {
+	// 		worker := f.workers[workerIdx]
+	// 		if worker != nil && elementIdx < len(worker.callSequenceElements) {
+	// 			elementsToProcess = append(elementsToProcess, worker.callSequenceElements[elementIdx])
+	// 		}
+	// 	}
 
-		// If we collected any elements, process them
-		if len(elementsToProcess) > 0 {
-			err := f.runTransactionsGPU(elementsToProcess)
-			if err != nil {
-				f.logger.Warn(fmt.Sprintf("Failed to process transaction data for element index %d in GPU", elementIdx), err)
-			}
-		}
-		// debugging
-		fmt.Println("end of GPU processing")
-		return nil
-	}
-	fmt.Println("\n end printing call data before GPU \n")
+	// 	// If we collected any elements, process them
+	// 	if len(elementsToProcess) > 0 {
+	// 		err := f.runTransactionsGPU(elementsToProcess)
+	// 		if err != nil {
+	// 			f.logger.Warn(fmt.Sprintf("Failed to process transaction data for element index %d in GPU", elementIdx), err)
+	// 		}
+	// 	}
+	// }
+	// fmt.Println("\n end printing call data before GPU \n")
 	// Now process transaction data for each worker
 	for i := 0; i < len(f.workers); i++ {
 		worker := f.workers[i]
@@ -1261,7 +1265,7 @@ func (f *Fuzzer) launchGPUKernel() error {
 		if utils.CheckContextDone(f.emergencyCtx) || utils.CheckContextDone(f.ctx) {
 			break
 		}
-
+		// fmt.Println("before SimulateExecuteCallSequenceGPUWithList")
 		// Execute the call sequence using the prepared list of elements (keeping existing code)
 		_, worker.lastExecutionError = calls.SimulateExecuteCallSequenceGPUWithList(
 			worker.chain,
@@ -1384,7 +1388,9 @@ func (f *Fuzzer) Start() error {
 	var err error
 
 	// While we're fuzzing, we'll want to have an initialized random provider.
-	f.randomProvider = rand.New(rand.NewSource(time.Now().UnixNano()))
+	// f.randomProvider = rand.New(rand.NewSource(time.Now().UnixNano()))
+	// debugging fixed seed
+	f.randomProvider = rand.New(rand.NewSource(1))
 
 	// Create our main and emergency running context (allows us to cancel across threads)
 	f.ctx, f.ctxCancelFunc = context.WithCancel(context.Background())

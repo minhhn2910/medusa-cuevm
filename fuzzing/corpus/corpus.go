@@ -461,7 +461,12 @@ func (c *Corpus) CheckSequenceCoverageAndUpdate(callSequence calls.CallSequence,
 	lastCall := callSequence[len(callSequence)-1]
 	lastCallChainReference := lastCall.ChainReference
 	lastMessageResult := lastCallChainReference.Block.MessageResults[lastCallChainReference.TransactionIndex]
+	// resultBytes, _ := json.MarshalIndent(lastMessageResult, "", "  ")
+	// fmt.Println("Detailed lastMessageResult:\n", string(resultBytes))
 	lastMessageCoverageMaps := coverage.GetCoverageTracerResults(lastMessageResult)
+
+	// coverageBytes, _ := json.MarshalIndent(lastMessageCoverageMaps, "", "  ")
+	// fmt.Println("Detailed lastMessageCoverageMaps:\n", string(coverageBytes))
 
 	// If we have none, because a coverage tracer wasn't attached when processing this call, we can stop.
 	if lastMessageCoverageMaps == nil {

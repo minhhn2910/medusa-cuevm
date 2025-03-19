@@ -23,6 +23,7 @@ func GetCoverageTracerResults(messageResults *types.MessageResults) *CoverageMap
 	// Try to obtain the results the tracer should've stored.
 	if genericResult, ok := messageResults.AdditionalResults[coverageTracerResultsKey]; ok {
 		if castedResult, ok := genericResult.(*CoverageMaps); ok {
+			// fmt.Println("GetCoverageTracerResults castedResult", castedResult.maps)
 			return castedResult
 		}
 	}
