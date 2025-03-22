@@ -215,7 +215,7 @@ func (c *Corpus) RandomMutationTargetSequence() (calls.CallSequence, error) {
 func (c *Corpus) initializeSequences(sequenceFiles *corpusDirectory[calls.CallSequence], testChain *chain.TestChain, deployedContracts map[common.Address]*contracts.Contract, useInMutations bool) error {
 	// Cache the base block index so that you can reset back to it after every sequence
 	baseBlockIndex := uint64(len(testChain.CommittedBlocks()))
-
+	fmt.Println("(cm *Corpus) initializeSequences")
 	// Loop for each sequence
 	var err error
 	for _, sequenceFileData := range sequenceFiles.files {
@@ -467,9 +467,10 @@ func (c *Corpus) CheckSequenceCoverageAndUpdate(callSequence calls.CallSequence,
 
 	// coverageBytes, _ := json.MarshalIndent(lastMessageCoverageMaps, "", "  ")
 	// fmt.Println("Detailed lastMessageCoverageMaps:\n", string(coverageBytes))
-
+	fmt.Println("\n (cm *Corpus) CheckSequenceCoverageAndUpdate corpus pointer:", c)
 	// If we have none, because a coverage tracer wasn't attached when processing this call, we can stop.
 	if lastMessageCoverageMaps == nil {
+		fmt.Println("\n (cm *Corpus) CheckSequenceCoverageAndUpdate lastMessageCoverageMaps is nil")
 		return nil
 	}
 
@@ -546,5 +547,36 @@ func (c *Corpus) Flush() error {
 		return err
 	}
 
+	return nil
+}
+
+// CheckGPUCoverageAndUpdate checks if coverage from GPU execution added new coverage
+// and updates the corpus if it did
+func (c *Corpus) CheckGPUCoverageAndUpdate(
+	gpuResults *coverage.GPUExecutionResult,
+	codeHashMap map[common.Address]common.Hash,
+	callSequence calls.CallSequence,
+	mutationChooserWeight *big.Int,
+	flushImmediately bool) error {
+	fmt.Println("\nGo: Checking GPU coverage and updating corpus\n")
+	// If we have coverage-guided fuzzing disabled or no calls in our sequence, there is nothing to do.
+	if len(callSequence) == 0 || gpuResults == nil {
+		return nil
+	}
+
+	// Merge the GPU coverage maps into our total coverage maps and check if we had an update
+	coverageUpdated, err := c.coverageMaps.UpdateCoverageFromGPU(codeHashMap, gpuResults)
+	if err != nil {
+		return err
+	}
+
+	// If we had an increase in coverage, we save the sequence
+	if coverageUpdated {
+		// Save this sequence for mutation purposes
+		err = c.addCallSequence(c.callSequenceFiles, callSequence, true, mutationChooserWeight, flushImmediately)
+		if err != nil {
+			return err
+		}
+	}
 	return nil
 }

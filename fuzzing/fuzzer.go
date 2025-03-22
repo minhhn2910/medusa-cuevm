@@ -66,6 +66,10 @@ int process_batch_transactions(const unsigned char* fromAddr, const unsigned cha
 
 // Updated function declaration with reset_state parameter
 int process_json_state_gpu(const char* json_state, uint32_t num_instances);
+
+// Function to return results to Go
+char* get_gpu_execution_results(int* result_size);
+void free_gpu_execution_results(char* data);
 */
 import "C"
 
@@ -128,6 +132,9 @@ type Fuzzer struct {
 
 	// logger describes the Fuzzer's log object that can be used to log important events
 	logger *logging.Logger
+
+	// contractAddressToCodeHash maps contract addresses to their runtime bytecode hashes for quick lookup
+	contractAddressToCodeHash map[common.Address]common.Hash
 }
 
 // NewFuzzer returns an instance of a new Fuzzer provided a project configuration, or an error if one is encountered
@@ -185,13 +192,14 @@ func NewFuzzer(config config.ProjectConfig) (*Fuzzer, error) {
 
 	// Create and return our fuzzing instance.
 	fuzzer := &Fuzzer{
-		config:              config,
-		senders:             senders,
-		deployer:            deployer,
-		baseValueSet:        valuegeneration.NewValueSet(),
-		contractDefinitions: make(fuzzerTypes.Contracts, 0),
-		testCases:           make([]TestCase, 0),
-		testCasesFinished:   make(map[string]TestCase),
+		config:                    config,
+		senders:                   senders,
+		deployer:                  deployer,
+		baseValueSet:              valuegeneration.NewValueSet(),
+		contractDefinitions:       make(fuzzerTypes.Contracts, 0),
+		testCases:                 make([]TestCase, 0),
+		testCasesFinished:         make(map[string]TestCase),
+		contractAddressToCodeHash: make(map[common.Address]common.Hash),
 		Hooks: FuzzerHooks{
 			NewCallSequenceGeneratorConfigFunc: defaultCallSequenceGeneratorConfigFunc,
 			NewShrinkingValueMutatorFunc:       defaultShrinkingValueMutatorFunc,
@@ -718,10 +726,10 @@ func (f *Fuzzer) spawnWorkersLoop(baseTestChain *chain.TestChain) error {
 			working = false
 		}
 		counter++
-		if counter > 10 {
-			working = false
-		}
-		// working = false
+		// if counter > 1 {
+		// 	working = false
+		// }
+		working = false
 	}
 
 	// Clean up workers
@@ -875,8 +883,10 @@ func (f *Fuzzer) prepareWorkersDataInParallel(baseTestChain *chain.TestChain) (b
 
 			// Create execution check function for this worker
 			worker.executionCheckFunc = func(currentlyExecutedSequence calls.CallSequence) (bool, error) {
+
 				// Get the last call sequence element that was executed
 				latestCallSequenceElement := currentlyExecutedSequence[len(currentlyExecutedSequence)-1]
+				fmt.Println("executionCheckFunc latestCallSequenceElement", latestCallSequenceElement)
 				// Get the decoded return values and add it to the base value set
 				// Don't throw an error since we care more about coverage than adding the return values to the base value set
 				decodedReturnValues, err := latestCallSequenceElement.DecodedReturnValues()
@@ -896,7 +906,7 @@ func (f *Fuzzer) prepareWorkersDataInParallel(baseTestChain *chain.TestChain) (b
 				// this call sequence.
 				for _, callSequenceTestFunc := range f.Hooks.CallSequenceTestFuncs {
 
-					fmt.Println("currentlyExecutedSequence", currentlyExecutedSequence)
+					fmt.Println("\n\ncallSequenceTestFunc before calling")
 					newShrinkRequests, err := callSequenceTestFunc(worker, currentlyExecutedSequence)
 					if err != nil {
 						return true, err
@@ -1080,6 +1090,51 @@ func (f *Fuzzer) runTransactionsGPU(callSequenceElements []*calls.CallSequenceEl
 // prepareAndProcessChainStateInGPU extracts the chain state and block header information and sends it to the GPU
 func (f *Fuzzer) prepareAndProcessChainStateInGPU(testChain *chain.TestChain) error {
 	fmt.Println("Go: Preparing and processing chain state data in GPU")
+	// Print all deployed contracts and their bytecode hashes
+	fmt.Println("===== DEPLOYED CONTRACTS AND THEIR BYTECODE HASHES =====")
+	worker := f.workers[0]
+	if worker != nil && worker.deployedContracts != nil {
+		fmt.Printf("Worker %d deployed contracts:\n", worker.workerIndex)
+		for addr, contract := range worker.deployedContracts {
+			// Check if we already have the hash in our map
+			if codeHash, exists := f.contractAddressToCodeHash[addr]; exists {
+				fmt.Printf("  Contract %s at %s - cached hash: %s\n",
+					contract.Name(), addr.Hex(), codeHash.Hex())
+				continue
+			}
+
+			// Get the bytecode from the chain state
+			code := contract.CompiledContract().RuntimeBytecode
+			// Calculate the hash using similar logic to getContractCoverageMapHash
+			var codeHash common.Hash
+
+			// For runtime bytecode, try to extract hash from metadata first
+			metadata := compilationTypes.ExtractContractMetadata(code)
+			if metadata != nil {
+				metadataHash := metadata.ExtractBytecodeHash()
+				if metadataHash != nil {
+					codeHash = common.BytesToHash(metadataHash)
+					// Save the hash to our map
+					f.contractAddressToCodeHash[addr] = codeHash
+					fmt.Printf("  Contract %s at %s - metadata hash: %s\n",
+						contract.Name(), addr.Hex(), codeHash.Hex())
+					continue
+				}
+			}
+			// Fall back to hashing the stripped bytecode
+			strippedCode := compilationTypes.RemoveContractMetadata(code)
+			codeHash = crypto.Keccak256Hash(strippedCode)
+			// Save the hash to our map
+			f.contractAddressToCodeHash[addr] = codeHash
+			fmt.Printf("  Contract %s at %s - bytecode hash: %s\n",
+				contract.Name(), addr.Hex(), codeHash.Hex())
+		}
+		fmt.Println()
+	}
+
+	fmt.Println("========================================================")
+
+	// codeCoverageLookupHash := getContractCoverageMapHash(code, isCreate)
 
 	// Get the current state from the chain
 	state := testChain.State()
@@ -1207,53 +1262,71 @@ func (f *Fuzzer) launchGPUKernel() error {
 	f.logger.Info("Launching GPU kernel to execute call sequences with prepared element lists")
 
 	// Process state data from our base test chain for GPU processing
-	// if len(f.workers) > 0 && f.workers[0] != nil && f.workers[0].chain != nil {
-	// 	err := f.prepareAndProcessChainStateInGPU(f.workers[0].chain)
-	// 	if err != nil {
-	// 		f.logger.Warn("Failed to prepare state data for GPU", err)
-	// 	}
-	// }
+	if len(f.workers) > 0 && f.workers[0] != nil && f.workers[0].chain != nil {
+		err := f.prepareAndProcessChainStateInGPU(f.workers[0].chain)
+		if err != nil {
+			f.logger.Warn("Failed to prepare state data for GPU", err)
+		}
+	}
 
-	// // loop and print data
-	// fmt.Println("call data before GPU")
-	// for i := 0; i < len(f.workers); i++ {
-	// 	worker := f.workers[i]
-	// 	fmt.Println("worker: ", i)
-	// 	for _, element := range worker.callSequenceElements {
-	// 		fmt.Println("from: ", element.Call.From)
-	// 		fmt.Println("to: ", element.Call.To)
-	// 		fmt.Println("value: ", element.Call.Value)
-	// 		fmt.Println("gas limit: ", element.Call.GasLimit)
-	// 		fmt.Println("gas price: ", element.Call.GasPrice)
-	// 		fmt.Println("nonce: ", element.Call.Nonce)
-	// 		fmt.Printf("data: %x\n", element.Call.Data)
-	// 		fmt.Println("--------------------------------")
-	// 	}
-
-	// 	// run in GPU
-	// 	// Process transaction data in GPU
-	// }
 	// Process one element at a time from each worker
-	// for elementIdx := 0; elementIdx < len(f.workers[0].callSequenceElements); elementIdx++ {
-	// 	// Collect one element from each worker that has an element at this index
-	// 	elementsToProcess := make([]*calls.CallSequenceElement, 0)
+	for elementIdx := 0; elementIdx < len(f.workers[0].callSequenceElements); elementIdx++ {
+		// Collect one element from each worker that has an element at this index
+		elementsToProcess := make([]*calls.CallSequenceElement, 0)
 
-	// 	for workerIdx := 0; workerIdx < len(f.workers); workerIdx++ {
-	// 		worker := f.workers[workerIdx]
-	// 		if worker != nil && elementIdx < len(worker.callSequenceElements) {
-	// 			elementsToProcess = append(elementsToProcess, worker.callSequenceElements[elementIdx])
-	// 		}
-	// 	}
+		for workerIdx := 0; workerIdx < len(f.workers); workerIdx++ {
+			worker := f.workers[workerIdx]
+			if worker != nil && elementIdx < len(worker.callSequenceElements) {
+				elementsToProcess = append(elementsToProcess, worker.callSequenceElements[elementIdx])
+			}
+		}
 
-	// 	// If we collected any elements, process them
-	// 	if len(elementsToProcess) > 0 {
-	// 		err := f.runTransactionsGPU(elementsToProcess)
-	// 		if err != nil {
-	// 			f.logger.Warn(fmt.Sprintf("Failed to process transaction data for element index %d in GPU", elementIdx), err)
-	// 		}
-	// 	}
-	// }
-	// fmt.Println("\n end printing call data before GPU \n")
+		// If we collected any elements, process them
+		if len(elementsToProcess) > 0 {
+			// err := f.runTransactionsGPU(elementsToProcess)
+			// if err != nil {
+			// 	f.logger.Warn(fmt.Sprintf("Failed to process transaction data for element index %d in GPU", elementIdx), err)
+			// }
+
+			// Add new code to process GPU execution results
+			gpuResults, err := f.getGPUExecutionResults()
+			if err != nil {
+				f.logger.Warn("Failed to get GPU execution results", err)
+			} else if gpuResults != nil {
+
+				for i, worker := range f.workers {
+					if i < len(gpuResults.ReturnData) {
+						// The return data can be used to update the worker's value set if needed
+						if len(gpuResults.ReturnData[i]) > 0 && worker != nil {
+							// Only record the sequence if it has elements
+							if len(worker.callSequenceElements) > 0 {
+								currentSequence := make(calls.CallSequence, len(worker.callSequenceElements))
+								for j, elem := range worker.callSequenceElements {
+									currentSequence[j] = elem
+								}
+
+								err = f.corpus.CheckGPUCoverageAndUpdate(
+									gpuResults,
+									f.contractAddressToCodeHash,
+									currentSequence,
+									worker.getNewCorpusCallSequenceWeight(),
+									true)
+								if err != nil {
+									return err
+								}
+							}
+						}
+					}
+				}
+
+			}
+		}
+
+		// debug, stop here
+		break
+
+	}
+
 	// Now process transaction data for each worker
 	for i := 0; i < len(f.workers); i++ {
 		worker := f.workers[i]
@@ -1265,7 +1338,7 @@ func (f *Fuzzer) launchGPUKernel() error {
 		if utils.CheckContextDone(f.emergencyCtx) || utils.CheckContextDone(f.ctx) {
 			break
 		}
-		// fmt.Println("before SimulateExecuteCallSequenceGPUWithList")
+		fmt.Println("\nbefore SimulateExecuteCallSequenceGPUWithList, worker i: \n", i)
 		// Execute the call sequence using the prepared list of elements (keeping existing code)
 		_, worker.lastExecutionError = calls.SimulateExecuteCallSequenceGPUWithList(
 			worker.chain,
@@ -1688,4 +1761,26 @@ func (f *Fuzzer) printExitingResults() {
 
 	// Print our final tally of test statuses.
 	f.logger.Info("Test summary: ", colors.GreenBold, testCountPassed, colors.Reset, " test(s) passed, ", colors.RedBold, testCountFailed, colors.Reset, " test(s) failed")
+}
+
+// New function to get GPU execution results
+func (f *Fuzzer) getGPUExecutionResults() (*coverage.GPUExecutionResult, error) {
+	var resultSize C.int
+	resultPtr := C.get_gpu_execution_results(&resultSize)
+	if resultPtr == nil {
+		return nil, nil
+	}
+	defer C.free_gpu_execution_results(resultPtr)
+
+	// Convert C string to Go string
+	jsonData := C.GoStringN(resultPtr, C.int(resultSize))
+
+	// Parse JSON data
+	var result coverage.GPUExecutionResult
+	err := json.Unmarshal([]byte(jsonData), &result)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse GPU execution results: %v", err)
+	}
+
+	return &result, nil
 }

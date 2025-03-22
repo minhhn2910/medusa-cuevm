@@ -266,6 +266,7 @@ func (t *ExecutionTrace) generateCallFrameExitElements(callFrame *CallFrame) []a
 
 	// If we could not resolve any custom error, we simply print out the generic VM error message.
 	elements = append(elements, colors.RedBold, fmt.Sprintf("[vm error ('%v')]", callFrame.ReturnError.Error()), colors.Reset, "\n")
+	fmt.Println("ExecutionTrace generateCallFrameExitElements(callFrame *CallFrame) elements", elements)
 	return elements
 }
 
