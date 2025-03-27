@@ -417,6 +417,19 @@ func (cm *ContractCoverageMap) Equal(b *ContractCoverageMap) bool {
 // update updates the current ContractCoverageMap with the provided one.
 // Returns two booleans indicating whether successful or reverted coverage changed, or an error if one was encountered.
 func (cm *ContractCoverageMap) update(coverageMap *ContractCoverageMap) (bool, bool, error) {
+	fmt.Println("(cm *ContractCoverageMap) update coverageMap. to merge")
+	// Debug: Print the coverageMap to be merged using JSON marshaling
+	if coverageMap != nil {
+		jsonData, err := json.MarshalIndent(coverageMap, "", "  ")
+		if err != nil {
+			fmt.Println("Error marshaling coverageMap:", err)
+		} else {
+			fmt.Println("Coverage map to be merged:")
+			fmt.Println(string(jsonData))
+		}
+	} else {
+		fmt.Println("Coverage map to be merged is nil")
+	}
 	// Update our success coverage data
 	successfulCoverageChanged, err := cm.successfulCoverage.update(coverageMap.successfulCoverage)
 	fmt.Println("(cm *ContractCoverageMap) update successfulCoverageChanged: ", successfulCoverageChanged, err)
@@ -486,11 +499,13 @@ func (cm *CoverageMapBytecodeData) HitCount(pc int) uint {
 func (cm *CoverageMapBytecodeData) update(coverageMap *CoverageMapBytecodeData) (bool, error) {
 	// If the coverage map execution data provided is nil, exit early
 	if coverageMap.executedFlags == nil {
+		fmt.Println("update coverageMap.executedFlags == nil")
 		return false, nil
 	}
 
 	// If the current map has no execution data, simply set it to the provided one.
 	if cm.executedFlags == nil {
+		fmt.Println("update cm.executedFlags == nil")
 		cm.executedFlags = coverageMap.executedFlags
 		return true, nil
 	}

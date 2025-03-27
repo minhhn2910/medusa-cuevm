@@ -55,12 +55,36 @@ import (
 #include <stdlib.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <string.h>
 
 // Only declare the functions that are actually implemented
 int run_interpreter_go(const char* json_input, uint32_t skip_trace_parsing, uint32_t copy_state_data,
                        uint32_t reuse_state_data);
+
+					   // Define C-compatible structures that can be shared with Go
+typedef struct {
+    uint8_t* data;  // Pointer to the return data
+    uint32_t length;  // Length of the return data
+} ReturnDataEntry;
+
+typedef struct {
+    char** addresses;  // Array of contract addresses as strings
+    uint32_t num_addresses;  // Number of addresses
+
+    uint8_t** pc_coverage;  // Array of PC coverage arrays
+    uint32_t* pc_coverage_lengths;  // Length of each PC coverage array
+} CoverageDataEntry;
+
+typedef struct {
+    ReturnDataEntry* return_data;  // Array of return data entries
+    uint32_t num_return_data;  // Number of return data entries
+
+    CoverageDataEntry* coverage;  // Array of coverage data entries
+    uint32_t num_coverage;  // Number of coverage entries
+} GPUExecutionResultC;
+
 // Updated function declaration with reuse_state_data parameter
-int process_batch_transactions(const unsigned char* fromAddr, const unsigned char* toAddr, const unsigned char* values,
+GPUExecutionResultC* process_batch_transactions(const unsigned char* fromAddr, const unsigned char* toAddr, const unsigned char* values,
                                const unsigned char* callData, int callDataLen, const uint32_t* dataOffsets,
                                int dataOffsetsLen, const uint32_t* dataSizes, int dataSizesLen, int txCount);
 
@@ -68,8 +92,11 @@ int process_batch_transactions(const unsigned char* fromAddr, const unsigned cha
 int process_json_state_gpu(const char* json_state, uint32_t num_instances);
 
 // Function to return results to Go
-char* get_gpu_execution_results(int* result_size);
-void free_gpu_execution_results(char* data);
+// Function to get GPU execution results
+GPUExecutionResultC* get_gpu_execution_results();
+
+// Function to free GPU execution results
+void free_gpu_execution_results(GPUExecutionResultC* result);
 */
 import "C"
 
@@ -995,7 +1022,7 @@ func (f *Fuzzer) prepareWorkersDataInParallel(baseTestChain *chain.TestChain) (b
 }
 
 // prepareAndProcessTransactionDataInGPU extracts transaction data from call sequence elements and sends it to the GPU
-func (f *Fuzzer) runTransactionsGPU(callSequenceElements []*calls.CallSequenceElement) error {
+func (f *Fuzzer) runTransactionsGPU(callSequenceElements []*calls.CallSequenceElement) (*coverage.GPUExecutionResult, error) {
 	fmt.Println("\nGo: Preparing transaction data in batch for GPU processing worker\n")
 
 	// Count valid call elements first
@@ -1007,7 +1034,7 @@ func (f *Fuzzer) runTransactionsGPU(callSequenceElements []*calls.CallSequenceEl
 	}
 
 	if validCallCount == 0 {
-		return nil // Nothing to process
+		return nil, nil // Nothing to process
 	}
 
 	// Use fixed from and to addresses (32 bytes each)
@@ -1070,7 +1097,7 @@ func (f *Fuzzer) runTransactionsGPU(callSequenceElements []*calls.CallSequenceEl
 	}
 
 	// Call C function with simplified arrays
-	result := C.process_batch_transactions(
+	cResult := C.process_batch_transactions(
 		(*C.uchar)(unsafe.Pointer(&fromAddr[0])),
 		(*C.uchar)(unsafe.Pointer(&toAddr[0])),
 		(*C.uchar)(unsafe.Pointer(&values[0])),
@@ -1080,11 +1107,73 @@ func (f *Fuzzer) runTransactionsGPU(callSequenceElements []*calls.CallSequenceEl
 		C.int(validCallCount),
 	)
 
-	if result != 0 {
-		return fmt.Errorf("GPU transaction processing returned error code: %d", result)
+	// Check if execution failed
+	if cResult == nil {
+		fmt.Println("GPU transaction processing failed")
+		return nil, fmt.Errorf("GPU transaction processing failed")
 	}
 
-	return nil
+	// Ensure we free the C result when we're done with it
+	defer C.free_gpu_execution_results(cResult)
+
+	// Parse the C result into a Go structure
+	result := &coverage.GPUExecutionResult{
+		ReturnData: make([][]byte, int(cResult.num_return_data)),
+		Coverage:   make([]coverage.GPUCoverage, int(cResult.num_coverage)),
+	}
+
+	// Process return data
+	returnDataSlice := unsafe.Slice(cResult.return_data, int(cResult.num_return_data))
+	for i := 0; i < int(cResult.num_return_data); i++ {
+		cData := returnDataSlice[i]
+		if cData.data != nil && cData.length > 0 {
+			// Create a Go slice that directly references the C data
+			dataSlice := C.GoBytes(unsafe.Pointer(cData.data), C.int(cData.length))
+			result.ReturnData[i] = dataSlice
+		} else {
+			result.ReturnData[i] = []byte{}
+		}
+	}
+
+	// Process coverage data
+	coverageSlice := unsafe.Slice(cResult.coverage, int(cResult.num_coverage))
+	for i := 0; i < int(cResult.num_coverage); i++ {
+		cCov := coverageSlice[i]
+		coverage := coverage.GPUCoverage{
+			Addresses:  make([]string, int(cCov.num_addresses)),
+			PCCoverage: make([][]uint, int(cCov.num_addresses)),
+		}
+
+		// Process addresses
+		addressesSlice := unsafe.Slice(cCov.addresses, int(cCov.num_addresses))
+		for j := 0; j < int(cCov.num_addresses); j++ {
+			coverage.Addresses[j] = C.GoString(addressesSlice[j])
+
+			// Process PC coverage for this address
+			if j < int(cCov.num_addresses) {
+				pcCovSlice := unsafe.Slice(cCov.pc_coverage, int(cCov.num_addresses))
+				pcCovLengthsSlice := unsafe.Slice(cCov.pc_coverage_lengths, int(cCov.num_addresses))
+
+				if pcCovSlice[j] != nil {
+					length := pcCovLengthsSlice[j]
+					pcCov := make([]uint, int(length))
+
+					// Convert byte array to uint array
+					cPCCov := unsafe.Slice(pcCovSlice[j], int(length))
+					for k := 0; k < int(length); k++ {
+						if cPCCov[k] != 0 {
+							pcCov[k] = 1
+						}
+					}
+					coverage.PCCoverage[j] = pcCov
+				}
+			}
+		}
+
+		result.Coverage[i] = coverage
+	}
+
+	return result, nil
 }
 
 // prepareAndProcessChainStateInGPU extracts the chain state and block header information and sends it to the GPU
@@ -1170,6 +1259,87 @@ func (f *Fuzzer) prepareAndProcessChainStateInGPU(testChain *chain.TestChain) er
 	}
 
 	return nil
+}
+
+// GPUExecutionResult represents the results from GPU execution
+type GPUExecutionResult struct {
+	ReturnData [][]byte
+	Coverage   []GPUCoverage
+}
+
+// GPUCoverage represents coverage data for a single GPU instance
+type GPUCoverage struct {
+	Addresses  []string
+	PCCoverage [][]uint
+}
+
+// getGPUExecutionResults gets results directly from the C++ library
+func (f *Fuzzer) getGPUExecutionResults() (*coverage.GPUExecutionResult, error) {
+	cResult := C.get_gpu_execution_results()
+	if cResult == nil {
+		return nil, nil
+	}
+
+	defer C.free_gpu_execution_results(cResult)
+
+	// Convert C result to Go structure
+	result := &coverage.GPUExecutionResult{
+		ReturnData: make([][]byte, int(cResult.num_return_data)),
+		Coverage:   make([]coverage.GPUCoverage, int(cResult.num_coverage)),
+	}
+
+	// Process return data
+	returnDataSlice := unsafe.Slice(cResult.return_data, int(cResult.num_return_data))
+	for i := 0; i < int(cResult.num_return_data); i++ {
+		cData := returnDataSlice[i]
+		if cData.data != nil && cData.length > 0 {
+			// Create a Go slice that directly references the C data
+			dataSlice := C.GoBytes(unsafe.Pointer(cData.data), C.int(cData.length))
+			result.ReturnData[i] = dataSlice
+		} else {
+			result.ReturnData[i] = []byte{}
+		}
+	}
+
+	// Process coverage data
+	coverageSlice := unsafe.Slice(cResult.coverage, int(cResult.num_coverage))
+	for i := 0; i < int(cResult.num_coverage); i++ {
+		cCov := coverageSlice[i]
+		coverage := coverage.GPUCoverage{
+			Addresses:  make([]string, int(cCov.num_addresses)),
+			PCCoverage: make([][]uint, int(cCov.num_addresses)),
+		}
+
+		// Process addresses
+		addressesSlice := unsafe.Slice(cCov.addresses, int(cCov.num_addresses))
+		for j := 0; j < int(cCov.num_addresses); j++ {
+			coverage.Addresses[j] = C.GoString(addressesSlice[j])
+
+			// Process PC coverage for this address
+			if j < int(cCov.num_addresses) {
+				pcCovSlice := unsafe.Slice(cCov.pc_coverage, int(cCov.num_addresses))
+				pcCovLengthsSlice := unsafe.Slice(cCov.pc_coverage_lengths, int(cCov.num_addresses))
+
+				if pcCovSlice[j] != nil {
+					length := pcCovLengthsSlice[j]
+					pcCov := make([]uint, int(length))
+
+					// Convert byte array to uint array
+					cPCCov := unsafe.Slice(pcCovSlice[j], int(length))
+					for k := 0; k < int(length); k++ {
+						if cPCCov[k] != 0 {
+							pcCov[k] = 1
+						}
+					}
+					coverage.PCCoverage[j] = pcCov
+				}
+			}
+		}
+
+		result.Coverage[i] = coverage
+	}
+
+	return result, nil
 }
 
 // convertStateToJSON converts a state dump to JSON string compatible with CuEVM's expected format
@@ -1283,13 +1453,13 @@ func (f *Fuzzer) launchGPUKernel() error {
 
 		// If we collected any elements, process them
 		if len(elementsToProcess) > 0 {
-			// err := f.runTransactionsGPU(elementsToProcess)
+			gpuResults, err := f.runTransactionsGPU(elementsToProcess)
 			// if err != nil {
 			// 	f.logger.Warn(fmt.Sprintf("Failed to process transaction data for element index %d in GPU", elementIdx), err)
 			// }
 
 			// Add new code to process GPU execution results
-			gpuResults, err := f.getGPUExecutionResults()
+			// gpuResults, err := f.getGPUExecutionResults()
 			if err != nil {
 				f.logger.Warn("Failed to get GPU execution results", err)
 			} else if gpuResults != nil {
@@ -1761,26 +1931,4 @@ func (f *Fuzzer) printExitingResults() {
 
 	// Print our final tally of test statuses.
 	f.logger.Info("Test summary: ", colors.GreenBold, testCountPassed, colors.Reset, " test(s) passed, ", colors.RedBold, testCountFailed, colors.Reset, " test(s) failed")
-}
-
-// New function to get GPU execution results
-func (f *Fuzzer) getGPUExecutionResults() (*coverage.GPUExecutionResult, error) {
-	var resultSize C.int
-	resultPtr := C.get_gpu_execution_results(&resultSize)
-	if resultPtr == nil {
-		return nil, nil
-	}
-	defer C.free_gpu_execution_results(resultPtr)
-
-	// Convert C string to Go string
-	jsonData := C.GoStringN(resultPtr, C.int(resultSize))
-
-	// Parse JSON data
-	var result coverage.GPUExecutionResult
-	err := json.Unmarshal([]byte(jsonData), &result)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse GPU execution results: %v", err)
-	}
-
-	return &result, nil
 }
