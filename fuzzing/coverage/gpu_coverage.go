@@ -10,6 +10,7 @@ import (
 type GPUExecutionResult struct {
 	ReturnData [][]byte      `json:"returnData"`
 	Coverage   []GPUCoverage `json:"coverage"`
+	Success    []bool        `json:"success"`
 }
 
 // GPUCoverage represents coverage data for a single GPU instance
