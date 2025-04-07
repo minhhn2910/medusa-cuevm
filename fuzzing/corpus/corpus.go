@@ -215,7 +215,7 @@ func (c *Corpus) RandomMutationTargetSequence() (calls.CallSequence, error) {
 func (c *Corpus) initializeSequences(sequenceFiles *corpusDirectory[calls.CallSequence], testChain *chain.TestChain, deployedContracts map[common.Address]*contracts.Contract, useInMutations bool) error {
 	// Cache the base block index so that you can reset back to it after every sequence
 	baseBlockIndex := uint64(len(testChain.CommittedBlocks()))
-
+	fmt.Println("(cm *Corpus) initializeSequences")
 	// Loop for each sequence
 	var err error
 	for _, sequenceFileData := range sequenceFiles.files {
@@ -454,6 +454,7 @@ func (c *Corpus) AddTestResultCallSequence(callSequence calls.CallSequence, muta
 func (c *Corpus) CheckSequenceCoverageAndUpdate(callSequence calls.CallSequence, mutationChooserWeight *big.Int, flushImmediately bool) error {
 	// If we have coverage-guided fuzzing disabled or no calls in our sequence, there is nothing to do.
 	if len(callSequence) == 0 {
+		fmt.Println("\n (cm *Corpus) CheckSequenceCoverageAndUpdate callSequence is empty")
 		return nil
 	}
 
@@ -461,10 +462,16 @@ func (c *Corpus) CheckSequenceCoverageAndUpdate(callSequence calls.CallSequence,
 	lastCall := callSequence[len(callSequence)-1]
 	lastCallChainReference := lastCall.ChainReference
 	lastMessageResult := lastCallChainReference.Block.MessageResults[lastCallChainReference.TransactionIndex]
+	// resultBytes, _ := json.MarshalIndent(lastMessageResult, "", "  ")
+	// fmt.Println("Detailed lastMessageResult:\n", string(resultBytes))
 	lastMessageCoverageMaps := coverage.GetCoverageTracerResults(lastMessageResult)
 
+	// coverageBytes, _ := json.MarshalIndent(lastMessageCoverageMaps, "", "  ")
+	// fmt.Println("Detailed lastMessageCoverageMaps:\n", string(coverageBytes))
+	// fmt.Println("\n (cm *Corpus) CheckSequenceCoverageAndUpdate corpus pointer:", c)
 	// If we have none, because a coverage tracer wasn't attached when processing this call, we can stop.
 	if lastMessageCoverageMaps == nil {
+		fmt.Println("\n (cm *Corpus) CheckSequenceCoverageAndUpdate lastMessageCoverageMaps is nil")
 		return nil
 	}
 
@@ -540,6 +547,53 @@ func (c *Corpus) Flush() error {
 	if err != nil {
 		return err
 	}
+
+	return nil
+}
+
+// CheckGPUCoverageAndUpdate checks if coverage from GPU execution added new coverage
+// and updates the corpus if it did
+func (c *Corpus) CheckGPUCoverageAndUpdate(
+	gpuResults *coverage.GPUExecutionResult,
+	codeHashMap map[common.Address]common.Hash,
+	callSequences []calls.CallSequence,
+	mutationChooserWeights []*big.Int,
+	flushImmediately bool) error {
+	fmt.Println("\nGo: Checking GPU coverage and updating corpus\n")
+	// If we have coverage-guided fuzzing disabled or no calls in our sequence, there is nothing to do.
+	if len(callSequences) == 0 || gpuResults == nil {
+		return nil
+	}
+
+	// Track if any coverage was updated across all instances
+	// coverageUpdated := false
+
+	// Process each GPU instance's coverage with its success flag
+	for i, instanceCoverage := range gpuResults.Coverage {
+		isSuccessful := false
+		// Make sure we have corresponding success data
+		if i < len(gpuResults.Success) {
+			isSuccessful = gpuResults.Success[i]
+		}
+
+		// Update coverage for this instance
+		instanceUpdated, err := c.coverageMaps.UpdateCoverageFromGPU(codeHashMap, instanceCoverage, isSuccessful)
+		if err != nil {
+			return err
+		}
+
+		// Track if any instance updated coverage
+		// coverageUpdated = coverageUpdated || instanceUpdated
+		if instanceUpdated {
+			// Save this sequence for mutation purposes
+			err := c.addCallSequence(c.callSequenceFiles, callSequences[i], true, mutationChooserWeights[i], flushImmediately)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	// If we had an increase in coverage, we save the sequence
 
 	return nil
 }

@@ -1,6 +1,7 @@
 package fuzzing
 
 import (
+	"fmt"
 	"math/big"
 	"sync"
 
@@ -46,6 +47,7 @@ func attachAssertionTestCaseProvider(fuzzer *Fuzzer) *AssertionTestCaseProvider 
 // checkAssertionFailures checks the results of the last call for assertion failures.
 // Returns the method ID, a boolean indicating if an assertion test failed, or an error if one occurs.
 func (t *AssertionTestCaseProvider) checkAssertionFailures(callSequence calls.CallSequence) (*contracts.ContractMethodID, bool, error) {
+	fmt.Println("AssertionTestCaseProvider checkAssertionFailures")
 	// If we have an empty call sequence, we cannot have an assertion failure
 	if len(callSequence) == 0 {
 		return nil, false, nil
@@ -65,6 +67,10 @@ func (t *AssertionTestCaseProvider) checkAssertionFailures(callSequence calls.Ca
 	// want to be backwards compatible with older Solidity which simply hit an invalid opcode and did not actually
 	// have a panic code.
 	lastExecutionResult := lastCall.ChainReference.MessageResults().ExecutionResult
+	// Print the lastExecutionResult using JSON marshaling for better debugging
+	fmt.Println("lastExecutionResult error ", lastExecutionResult.Err)
+	fmt.Println("lastExecutionResult returnData ", lastExecutionResult.ReturnData)
+
 	panicCode := abiutils.GetSolidityPanicCode(lastExecutionResult.Err, lastExecutionResult.ReturnData, true)
 	failure := false
 	if panicCode != nil {
@@ -161,6 +167,7 @@ func (t *AssertionTestCaseProvider) onWorkerDeployedContractAdded(event FuzzerWo
 // and any underlying FuzzerWorker. It is called after every call made in a call sequence. It checks whether invariants
 // in methods to test are upheld after each call the Fuzzer makes when testing a call sequence.
 func (t *AssertionTestCaseProvider) callSequencePostCallTest(worker *FuzzerWorker, callSequence calls.CallSequence) ([]ShrinkCallSequenceRequest, error) {
+	fmt.Println("callSequencePostCallTest")
 	// Create a list of shrink call sequence verifiers, which we populate for each failed test we want a call sequence
 	// shrunk for.
 	shrinkRequests := make([]ShrinkCallSequenceRequest, 0)
@@ -170,11 +177,14 @@ func (t *AssertionTestCaseProvider) callSequencePostCallTest(worker *FuzzerWorke
 	if err != nil {
 		return nil, err
 	}
-
+	fmt.Println("methodId", methodId)
+	fmt.Println("testFailed", testFailed)
 	// Obtain the test case for this method we're targeting for assertion testing.
 	t.testCasesLock.Lock()
 	testCase, testCaseExists := t.testCases[*methodId]
 	t.testCasesLock.Unlock()
+	fmt.Println("testCase", testCase)
+	fmt.Println("testCaseExists", testCaseExists)
 
 	// Verify a test case exists for this method called (if we're not assertion testing this method, stop)
 	if !testCaseExists {
@@ -189,6 +199,7 @@ func (t *AssertionTestCaseProvider) callSequencePostCallTest(worker *FuzzerWorke
 	// If we failed a test, we update our state immediately. We provide a shrink verifier which will update
 	// the call sequence for each shrunken sequence provided that fails the test.
 	if testFailed {
+		fmt.Println("\n\n testFailed \n\n")
 		// Create a request to shrink this call sequence.
 		shrinkRequest := ShrinkCallSequenceRequest{
 			TestName:             testCase.Name(),

@@ -1,6 +1,8 @@
 package coverage
 
 import (
+	"encoding/json"
+	"fmt"
 	"math/big"
 
 	"github.com/crytic/medusa/chain"
@@ -23,6 +25,7 @@ func GetCoverageTracerResults(messageResults *types.MessageResults) *CoverageMap
 	// Try to obtain the results the tracer should've stored.
 	if genericResult, ok := messageResults.AdditionalResults[coverageTracerResultsKey]; ok {
 		if castedResult, ok := genericResult.(*CoverageMaps); ok {
+			// fmt.Println("GetCoverageTracerResults castedResult", castedResult.maps)
 			return castedResult
 		}
 	}
@@ -101,10 +104,18 @@ func (t *CoverageTracer) NativeTracer() *chain.TestChainTracer {
 // OnTxStart is called upon the start of transaction execution, as defined by tracers.Tracer.
 func (t *CoverageTracer) OnTxStart(vm *tracing.VMContext, tx *coretypes.Transaction, from common.Address) {
 	// Reset our call frame states
+
 	t.callDepth = 0
 	t.coverageMaps = NewCoverageMaps()
 	t.callFrameStates = make([]*coverageTracerCallFrameState, 0)
 	t.evmContext = vm
+	fmt.Println("coverageTracer OnTxStart")
+	jsonData, jsonErr := json.Marshal(t.coverageMaps)
+	if jsonErr != nil {
+		logging.GlobalLogger.Warn("Failed to marshal coverage maps to JSON", jsonErr)
+	} else {
+		fmt.Println("Coverage Maps JSON:", string(jsonData))
+	}
 }
 
 // OnEnter initializes the tracing operation for the top of a call frame, as defined by tracers.Tracer.
@@ -136,12 +147,21 @@ func (t *CoverageTracer) OnExit(depth int, output []byte, gasUsed uint64, err er
 			logging.GlobalLogger.Panic("Coverage tracer failed to update revert coverage map during capture end", revertCoverageErr)
 		}
 	}
-
+	fmt.Println("coverageTracer OnExit update coverageMaps")
 	// Commit all our coverage maps up one call frame.
 	var coverageUpdateErr error
 	if isTopLevelFrame {
 		// Update the final coverage map if this is the top level call frame
 		_, _, coverageUpdateErr = t.coverageMaps.Update(t.callFrameStates[t.callDepth].pendingCoverageMap)
+		fmt.Println("\n\n After final coverageTracer OnExit update coverageMaps\n\n")
+		// For debugging: Marshal the coverage maps to JSON and print them
+		// jsonData, jsonErr := json.Marshal(t.coverageMaps)
+		// if jsonErr != nil {
+		// 	logging.GlobalLogger.Warn("Failed to marshal coverage maps to JSON", jsonErr)
+		// } else {
+		// 	// fmt.Println("Coverage Maps JSON:", string(jsonData))
+		// }
+
 	} else {
 		// Move coverage up one call frame
 		_, _, coverageUpdateErr = t.callFrameStates[t.callDepth-1].pendingCoverageMap.Update(t.callFrameStates[t.callDepth].pendingCoverageMap)

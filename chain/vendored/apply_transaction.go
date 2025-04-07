@@ -17,6 +17,8 @@
 package vendored
 
 import (
+	"math/big"
+
 	"github.com/crytic/medusa/chain/config"
 	"github.com/crytic/medusa/chain/types"
 	"github.com/ethereum/go-ethereum/common"
@@ -25,7 +27,6 @@ import (
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/params"
-	"math/big"
 )
 
 // EVMApplyTransaction is a vendored version of go-ethereum's unexported applyTransaction method (not to be confused

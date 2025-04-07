@@ -1,6 +1,7 @@
 package chain
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
@@ -715,7 +716,7 @@ func (t *TestChain) PendingBlockAddTx(message *core.Message, additionalTracers .
 	if err != nil {
 		return fmt.Errorf("test chain state write error when adding tx to pending block: %v", err)
 	}
-
+	fmt.Println("SimulateExecuteCallSequenceGPUWithList after vendored.EVMApplyTransaction")
 	// Create our message result
 	messageResult := &types.MessageResults{
 		PostStateRoot:     common.BytesToHash(receipt.PostState),
@@ -723,7 +724,8 @@ func (t *TestChain) PendingBlockAddTx(message *core.Message, additionalTracers .
 		Receipt:           receipt,
 		AdditionalResults: make(map[string]any, 0),
 	}
-
+	messageResultJSON, _ := json.Marshal(messageResult)
+	fmt.Println("\n\n messageResult", string(messageResultJSON))
 	// For every tracer we have, we call upon them to set their results for this transaction now.
 	t.transactionTracerRouter.CaptureTxEndSetAdditionalResults(messageResult)
 
