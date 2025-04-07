@@ -31,8 +31,12 @@ import (
 
 	"github.com/crytic/medusa-geth/accounts/abi"
 	"github.com/crytic/medusa-geth/common"
-	ethstate "github.com/ethereum/go-ethereum/core/state"
-	"github.com/ethereum/go-ethereum/core/types"
+
+	// ethstate "github.com/ethereum/go-ethereum/core/state"
+
+	// Change the import from ethereum/go-ethereum to crytic/medusa-geth
+	ethstate "github.com/crytic/medusa-geth/core/state"
+	// "github.com/ethereum/go-ethereum/core/types"
 
 	"unsafe"
 
@@ -47,8 +51,9 @@ import (
 	fuzzingutils "github.com/crytic/medusa/fuzzing/utils"
 	"github.com/crytic/medusa/fuzzing/valuegeneration"
 	"github.com/crytic/medusa/utils"
-	"github.com/ethereum/go-ethereum/accounts/abi"
-	"github.com/ethereum/go-ethereum/common"
+
+	// "github.com/ethereum/go-ethereum/accounts/abi"
+	// "github.com/ethereum/go-ethereum/common"
 	"golang.org/x/exp/maps"
 	"golang.org/x/exp/slices"
 )
@@ -1104,6 +1109,7 @@ func (f *Fuzzer) prepareAndProcessChainStateInGPU(testChain *chain.TestChain) er
 
 	// Get the current state from the chain
 	state := testChain.State()
+
 	eth_state, ok := state.(*ethstate.StateDB)
 
 	if state == nil || !ok {
