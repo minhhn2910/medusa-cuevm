@@ -924,7 +924,10 @@ func (f *Fuzzer) prepareWorkersDataInParallel(baseTestChain *chain.TestChain) (b
 
 				// Check for updates to coverage and corpus.
 				// If we detect coverage changes, add this sequence with weight as 1 + sequences tested (to avoid zero weights)
+				fmt.Println("\n\n Before CheckSequenceCoverageAndUpdate\n\n")
 				err = f.corpus.CheckSequenceCoverageAndUpdate(currentlyExecutedSequence, worker.getNewCorpusCallSequenceWeight(), true)
+				fmt.Println("\n\n After CheckSequenceCoverageAndUpdate\n\n")
+
 				if err != nil {
 					return true, err
 				}
@@ -1479,28 +1482,31 @@ func (f *Fuzzer) launchGPUKernel() error {
 				f.logger.Warn("Failed to get GPU execution results", err)
 			} else if gpuResults != nil {
 
+				// Collect all valid call sequences outside the loop
+				var workerSequences []calls.CallSequence
+				var workerWeights []*big.Int
 				for i, worker := range f.workers {
 					if i < len(gpuResults.ReturnData) {
 						// The return data can be used to update the worker's value set if needed
-						if len(gpuResults.ReturnData[i]) > 0 && worker != nil {
-							// Only record the sequence if it has elements
-							if len(worker.callSequenceElements) > 0 {
-								currentSequence := make(calls.CallSequence, len(worker.callSequenceElements))
-								for j, elem := range worker.callSequenceElements {
-									currentSequence[j] = elem
-								}
-
-								err = f.corpus.CheckGPUCoverageAndUpdate(
-									gpuResults,
-									f.contractAddressToCodeHash,
-									currentSequence,
-									worker.getNewCorpusCallSequenceWeight(),
-									true)
-								if err != nil {
-									return err
-								}
-							}
+						if len(gpuResults.ReturnData[i]) > 0 && worker != nil && len(worker.callSequenceElements) > 0 {
+							// Use type conversion instead of copying each element
+							workerSequences = append(workerSequences, calls.CallSequence(worker.callSequenceElements))
+							// Get the weight for this worker's sequence
+							workerWeights = append(workerWeights, worker.getNewCorpusCallSequenceWeight())
 						}
+					}
+				}
+
+				// Now use the collected sequences outside the loop
+				if len(workerSequences) > 0 {
+					err = f.corpus.CheckGPUCoverageAndUpdate(
+						gpuResults,
+						f.contractAddressToCodeHash,
+						workerSequences,
+						workerWeights, // Pass array of weights instead of single weight
+						true)
+					if err != nil {
+						return err
 					}
 				}
 

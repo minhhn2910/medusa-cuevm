@@ -405,10 +405,10 @@ func SimulateExecuteCallSequenceGPUWithList(
 				return callSequenceExecuted, err
 			}
 		}
-		fmt.Println("SimulateExecuteCallSequenceGPUWithList before add tx")
+		fmt.Println("\nSimulateExecuteCallSequenceGPUWithList before add tx\n")
 		// Try to add our transaction to this block.
 		err := chain.PendingBlockAddTx(callSequenceElement.Call.ToCoreMessage(), additionalTracers...)
-		fmt.Println("SimulateExecuteCallSequenceGPUWithList after add tx")
+		fmt.Println("\nSimulateExecuteCallSequenceGPUWithList after add tx\n")
 		if err != nil {
 			// If we encountered a block gas limit error, this tx is too expensive to fit in this block.
 			// If there are other transactions in the block, this makes sense. The block is "full".
@@ -441,7 +441,7 @@ func SimulateExecuteCallSequenceGPUWithList(
 		// We added our call to the block as a transaction. Call our step function with the update and check
 		// if it returned an error.
 		if executionCheckFunc != nil {
-			fmt.Println("SimulateExecuteCallSequenceGPUWithList before executionCheckFunc")
+			fmt.Println("\nSimulateExecuteCallSequenceGPUWithList before executionCheckFunc\n")
 			execCheckFuncRequestedBreak, err = executionCheckFunc(callSequenceExecuted)
 			if err != nil {
 				return callSequenceExecuted, err
@@ -452,12 +452,15 @@ func SimulateExecuteCallSequenceGPUWithList(
 				break
 			}
 		}
+		fmt.Println("\nSimulateExecuteCallSequenceGPUWithList after executionCheckFunc\n")
+		// debugging stop here
+		break
 
 	}
 
 	// Commit the last pending block.
 	if chain.PendingBlock() != nil {
-		fmt.Println("SimulateExecuteCallSequenceGPUWithList before commit pending block")
+		fmt.Println("\nSimulateExecuteCallSequenceGPUWithList before commit pending block\n")
 		err := chain.PendingBlockCommit()
 		if err != nil {
 			return callSequenceExecuted, err

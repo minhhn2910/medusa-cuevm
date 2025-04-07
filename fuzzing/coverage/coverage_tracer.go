@@ -153,14 +153,14 @@ func (t *CoverageTracer) OnExit(depth int, output []byte, gasUsed uint64, err er
 	if isTopLevelFrame {
 		// Update the final coverage map if this is the top level call frame
 		_, _, coverageUpdateErr = t.coverageMaps.Update(t.callFrameStates[t.callDepth].pendingCoverageMap)
-		fmt.Println("coverageTracer OnExit update coverageMaps")
+		fmt.Println("\n\n After final coverageTracer OnExit update coverageMaps\n\n")
 		// For debugging: Marshal the coverage maps to JSON and print them
-		jsonData, jsonErr := json.Marshal(t.coverageMaps)
-		if jsonErr != nil {
-			logging.GlobalLogger.Warn("Failed to marshal coverage maps to JSON", jsonErr)
-		} else {
-			fmt.Println("Coverage Maps JSON:", string(jsonData))
-		}
+		// jsonData, jsonErr := json.Marshal(t.coverageMaps)
+		// if jsonErr != nil {
+		// 	logging.GlobalLogger.Warn("Failed to marshal coverage maps to JSON", jsonErr)
+		// } else {
+		// 	// fmt.Println("Coverage Maps JSON:", string(jsonData))
+		// }
 
 	} else {
 		// Move coverage up one call frame

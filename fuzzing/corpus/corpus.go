@@ -454,6 +454,7 @@ func (c *Corpus) AddTestResultCallSequence(callSequence calls.CallSequence, muta
 func (c *Corpus) CheckSequenceCoverageAndUpdate(callSequence calls.CallSequence, mutationChooserWeight *big.Int, flushImmediately bool) error {
 	// If we have coverage-guided fuzzing disabled or no calls in our sequence, there is nothing to do.
 	if len(callSequence) == 0 {
+		fmt.Println("\n (cm *Corpus) CheckSequenceCoverageAndUpdate callSequence is empty")
 		return nil
 	}
 
@@ -467,7 +468,7 @@ func (c *Corpus) CheckSequenceCoverageAndUpdate(callSequence calls.CallSequence,
 
 	// coverageBytes, _ := json.MarshalIndent(lastMessageCoverageMaps, "", "  ")
 	// fmt.Println("Detailed lastMessageCoverageMaps:\n", string(coverageBytes))
-	fmt.Println("\n (cm *Corpus) CheckSequenceCoverageAndUpdate corpus pointer:", c)
+	// fmt.Println("\n (cm *Corpus) CheckSequenceCoverageAndUpdate corpus pointer:", c)
 	// If we have none, because a coverage tracer wasn't attached when processing this call, we can stop.
 	if lastMessageCoverageMaps == nil {
 		fmt.Println("\n (cm *Corpus) CheckSequenceCoverageAndUpdate lastMessageCoverageMaps is nil")
@@ -555,28 +556,44 @@ func (c *Corpus) Flush() error {
 func (c *Corpus) CheckGPUCoverageAndUpdate(
 	gpuResults *coverage.GPUExecutionResult,
 	codeHashMap map[common.Address]common.Hash,
-	callSequence calls.CallSequence,
-	mutationChooserWeight *big.Int,
+	callSequences []calls.CallSequence,
+	mutationChooserWeights []*big.Int,
 	flushImmediately bool) error {
 	fmt.Println("\nGo: Checking GPU coverage and updating corpus\n")
 	// If we have coverage-guided fuzzing disabled or no calls in our sequence, there is nothing to do.
-	if len(callSequence) == 0 || gpuResults == nil {
+	if len(callSequences) == 0 || gpuResults == nil {
 		return nil
 	}
 
-	// Merge the GPU coverage maps into our total coverage maps and check if we had an update
-	coverageUpdated, err := c.coverageMaps.UpdateCoverageFromGPU(codeHashMap, gpuResults)
-	if err != nil {
-		return err
-	}
+	// Track if any coverage was updated across all instances
+	// coverageUpdated := false
 
-	// If we had an increase in coverage, we save the sequence
-	if coverageUpdated {
-		// Save this sequence for mutation purposes
-		err = c.addCallSequence(c.callSequenceFiles, callSequence, true, mutationChooserWeight, flushImmediately)
+	// Process each GPU instance's coverage with its success flag
+	for i, instanceCoverage := range gpuResults.Coverage {
+		isSuccessful := false
+		// Make sure we have corresponding success data
+		if i < len(gpuResults.Success) {
+			isSuccessful = gpuResults.Success[i]
+		}
+
+		// Update coverage for this instance
+		instanceUpdated, err := c.coverageMaps.UpdateCoverageFromGPU(codeHashMap, instanceCoverage, isSuccessful)
 		if err != nil {
 			return err
 		}
+
+		// Track if any instance updated coverage
+		// coverageUpdated = coverageUpdated || instanceUpdated
+		if instanceUpdated {
+			// Save this sequence for mutation purposes
+			err := c.addCallSequence(c.callSequenceFiles, callSequences[i], true, mutationChooserWeights[i], flushImmediately)
+			if err != nil {
+				return err
+			}
+		}
 	}
+
+	// If we had an increase in coverage, we save the sequence
+
 	return nil
 }

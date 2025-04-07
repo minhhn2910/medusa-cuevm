@@ -166,7 +166,7 @@ func (cm *CoverageMaps) Update(coverageMaps *CoverageMaps) (bool, bool, error) {
 					return successCoverageChanged, revertedCoverageChanged, err
 				}
 			} else {
-				fmt.Println("(cm *CoverageMaps) Update not exist, to merge")
+				// fmt.Println("(cm *CoverageMaps) Update not exist, to merge")
 				mapsByAddress[codeAddress] = coverageMapToMerge
 				successCoverageChanged = coverageMapToMerge.successfulCoverage != nil
 				revertedCoverageChanged = coverageMapToMerge.revertedCoverage != nil
@@ -418,13 +418,18 @@ func (cm *ContractCoverageMap) Equal(b *ContractCoverageMap) bool {
 // Returns two booleans indicating whether successful or reverted coverage changed, or an error if one was encountered.
 func (cm *ContractCoverageMap) update(coverageMap *ContractCoverageMap) (bool, bool, error) {
 	fmt.Println("(cm *ContractCoverageMap) update coverageMap. to merge")
+	fmt.Println("(cm *ContractCoverageMap) update coverageMap. successfulCoverage: ", cm.successfulCoverage)
+	fmt.Println("(cm *ContractCoverageMap) update coverageMap. revertedCoverage: ", cm.revertedCoverage)
 	// Debug: Print the coverageMap to be merged using JSON marshaling
 	if coverageMap != nil {
-		jsonData, err := json.MarshalIndent(coverageMap, "", "  ")
-		if err != nil {
-			fmt.Println("Error marshaling coverageMap:", err)
-		} else {
-			fmt.Println("Coverage map to be merged:")
+		jsonData, err := json.MarshalIndent(coverageMap.successfulCoverage, "", "  ")
+		if err == nil {
+			fmt.Println("SuccessfulCoverage map to be merged:")
+			fmt.Println(string(jsonData))
+		}
+		jsonData, err = json.MarshalIndent(coverageMap.revertedCoverage, "", "  ")
+		if err == nil {
+			fmt.Println("RevertedCoverage map to be merged:")
 			fmt.Println(string(jsonData))
 		}
 	} else {
