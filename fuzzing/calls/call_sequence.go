@@ -8,7 +8,6 @@ import (
 	"github.com/crytic/medusa-geth/accounts/abi"
 	"github.com/crytic/medusa-geth/common"
 	"github.com/crytic/medusa-geth/crypto"
-	"github.com/crytic/medusa/chain"
 
 	chainTypes "github.com/crytic/medusa/chain/types"
 	fuzzingTypes "github.com/crytic/medusa/fuzzing/contracts"
@@ -245,8 +244,9 @@ func (cse *CallSequenceElement) String() string {
 	}
 
 	// Get our labels that we can use to make the string look better
-	labels := chain.GetLabels(cse.ChainReference.MessageResults())
-
+	// labels := chain.GetLabels(cse.ChainReference.MessageResults())
+	// CuEVM: disable label for now
+	labels := make(map[common.Address]string)
 	// Next decode our arguments (we jump four bytes to skip the function selector)
 	args, err := method.Inputs.Unpack(cse.Call.Data[4:])
 	argsText := "<unable to unpack args>"
@@ -266,8 +266,9 @@ func (cse *CallSequenceElement) String() string {
 	}
 
 	// Trim the leading zeros and use the labels
-	fromAddress := utils.AttachLabelToAddress(cse.Call.From, labels[cse.Call.From])
-
+	// fromAddress := utils.AttachLabelToAddress(cse.Call.From, labels[cse.Call.From])
+	// CuEVM: disable label for now
+	fromAddress := cse.Call.From
 	// Return a formatted string representing this element.
 	return fmt.Sprintf(
 		"%s.%s(%s) (block=%s, time=%s, gas=%d, gasprice=%s, value=%s, sender=%s)",
