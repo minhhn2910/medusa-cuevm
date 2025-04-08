@@ -15,12 +15,15 @@ type GPUExecutionResult struct {
 
 // GPUCoverage represents coverage data for a single GPU instance
 type GPUCoverage struct {
-	Addresses  []string `json:"addresses"`  // Hex strings of contract addresses
-	PCCoverage [][]uint `json:"pcCoverage"` // PC coverage flags for each address
+	Addresses       []string   `json:"addresses"`       // Hex strings of contract addresses
+	BranchCoverages [][]uint64 `json:"branchCoverages"` // PC coverage flags for each address
 }
 
 // UpdateCoverageFromGPU updates the coverage maps with data returned from GPU execution
 func (cm *CoverageMaps) UpdateCoverageFromGPU(codeHashMap map[common.Address]common.Hash, gpuCoverage GPUCoverage, isSuccessful bool) (bool, error) {
+	fmt.Println("(cm *CoverageMaps) UpdateCoverageFromGPU")
+	fmt.Println("gpuCoverage: ", gpuCoverage)
+	fmt.Println("isSuccessful: ", isSuccessful)
 	// Acquire our thread lock and defer our unlocking for when we exit this method
 	cm.updateLock.Lock()
 	defer cm.updateLock.Unlock()
@@ -29,14 +32,14 @@ func (cm *CoverageMaps) UpdateCoverageFromGPU(codeHashMap map[common.Address]com
 	coverageChanged := false
 
 	// Skip empty coverage data
-	if len(gpuCoverage.Addresses) == 0 || len(gpuCoverage.PCCoverage) == 0 {
+	if len(gpuCoverage.Addresses) == 0 || len(gpuCoverage.BranchCoverages) == 0 {
 		return false, nil
 	}
 
 	// Process each address and its coverage
 	for i, addrStr := range gpuCoverage.Addresses {
 		fmt.Println("(cm *CoverageMaps) UpdateCoverageFromGPU addrStr: ", addrStr)
-		if i >= len(gpuCoverage.PCCoverage) {
+		if i >= len(gpuCoverage.BranchCoverages) {
 			break // Safety check
 		}
 
@@ -44,8 +47,8 @@ func (cm *CoverageMaps) UpdateCoverageFromGPU(codeHashMap map[common.Address]com
 		addr := common.HexToAddress(addrStr)
 
 		// Skip addresses with no coverage
-		pcCoverage := gpuCoverage.PCCoverage[i]
-		if len(pcCoverage) == 0 {
+		branchCoverage := gpuCoverage.BranchCoverages[i]
+		if len(branchCoverage) == 0 {
 			continue
 		}
 
@@ -56,65 +59,36 @@ func (cm *CoverageMaps) UpdateCoverageFromGPU(codeHashMap map[common.Address]com
 			// Skip addresses that don't have a code hash mapping
 			continue
 		}
-		/* todo: continue
-		// Create a new CoverageMapBytecodeData for this address's coverage
-		coverageData := &CoverageMapBytecodeData{
-			executedFlags: pcCoverage,
+
+		// Create a new contract coverage map for this GPU coverage data
+		coverageMapToMerge := &ContractCoverageMap{
+			executedMarkers: make(map[uint64]uint64),
 		}
 
-		// Check if we have a map for this code hash
-		mapsByAddress, codeHashExists := cm.maps[codeHash]
+		// Convert the PC coverage array into a marker->count map
+		for _, pc := range branchCoverage {
+			coverageMapToMerge.executedMarkers[uint64(pc)]++
+		}
 
+		// If a coverage map lookup for this code hash doesn't exist, create the mapping
+		mapsByAddress, codeHashExists := cm.maps[codeHash]
 		if !codeHashExists {
-			fmt.Println("(cm *CoverageMaps) UpdateCoverageFromGPU codeHashExists: ", codeHashExists)
-			// Create a new map for this code hash
 			mapsByAddress = make(map[common.Address]*ContractCoverageMap)
 			cm.maps[codeHash] = mapsByAddress
 		}
 
-		// Check if we have a coverage map for this address
-		if existingMap, addrExists := mapsByAddress[addr]; addrExists {
-			// Update existing coverage map based on execution success
-			var changed bool
-			var err error
-			if isSuccessful {
-				changed, err = existingMap.successfulCoverage.update(coverageData)
-			} else {
-				changed, err = existingMap.revertedCoverage.update(coverageData)
-			}
+		// If a coverage map for this address already exists, update it
+		// Otherwise, set it to the new coverage map
+		if existingCoverageMap, addrExists := mapsByAddress[addr]; addrExists {
+			changed, err := existingCoverageMap.update(coverageMapToMerge)
 			if err != nil {
 				return coverageChanged, err
 			}
 			coverageChanged = coverageChanged || changed
 		} else {
-			// Create a new contract coverage map with both fields initialized
-			codeCoverageSize := len(pcCoverage)
-			newCoverageMap := &ContractCoverageMap{
-				successfulCoverage: &CoverageMapBytecodeData{
-					executedFlags: make([]uint, codeCoverageSize),
-				},
-				revertedCoverage: &CoverageMapBytecodeData{
-					executedFlags: make([]uint, codeCoverageSize),
-				},
-			}
-
-			// Update the new coverage map based on execution success
-			var changed bool
-			var err error
-			if isSuccessful {
-				changed, err = newCoverageMap.successfulCoverage.update(coverageData)
-			} else {
-				changed, err = newCoverageMap.revertedCoverage.update(coverageData)
-			}
-			if err != nil {
-				return coverageChanged, err
-			}
-
-			// Add to our maps
-			mapsByAddress[addr] = newCoverageMap
-			coverageChanged = coverageChanged || changed
+			mapsByAddress[addr] = coverageMapToMerge
+			coverageChanged = coverageChanged || (coverageMapToMerge.executedMarkers != nil)
 		}
-		*/
 	}
 
 	return coverageChanged, nil

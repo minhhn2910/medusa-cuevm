@@ -1,6 +1,8 @@
 package coverage
 
 import (
+	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/crytic/medusa-geth/common"
@@ -333,4 +335,57 @@ func (cm *ContractCoverageMap) HitCount(marker uint64) uint64 {
 
 	// Otherwise, return the hit count
 	return cm.executedMarkers[marker]
+}
+
+// DebugString returns a simple formatted string representation of the coverage maps for debugging
+func (cm *CoverageMaps) DebugString() string {
+	cm.updateLock.Lock()
+	defer cm.updateLock.Unlock()
+
+	var sb strings.Builder
+	sb.WriteString("CoverageMaps:\n")
+
+	if len(cm.maps) == 0 {
+		sb.WriteString("  <empty>\n")
+		return sb.String()
+	}
+
+	for codeHash, addressMaps := range cm.maps {
+		sb.WriteString(fmt.Sprintf("  CodeHash: %s\n", codeHash.Hex()))
+		for address, coverageMap := range addressMaps {
+			markerCount := 0
+			if coverageMap.executedMarkers != nil {
+				markerCount = len(coverageMap.executedMarkers)
+			}
+			sb.WriteString(fmt.Sprintf("    Address: %s, Markers: %d\n", address.Hex(), markerCount))
+
+			// Print all markers and their hit counts
+			if coverageMap.executedMarkers != nil && markerCount > 0 {
+				sb.WriteString("      Markers:\n")
+				for marker, hits := range coverageMap.executedMarkers {
+					// Extract source and destination from marker
+					src := marker >> 32
+					dst := marker & 0xFFFFFFFF
+
+					// Print raw marker data
+					sb.WriteString(fmt.Sprintf("        Raw: 0x%016x, Src: 0x%08x (%d), Dst: 0x%08x (%d), Hits: %d",
+						marker, src, src, dst, dst, hits))
+
+					// Try to identify marker type
+					if src == ENTER_MARKER_XOR {
+						sb.WriteString(" (ENTER)")
+					} else if dst == REVERT_MARKER_XOR {
+						sb.WriteString(" (REVERT)")
+					} else if dst == RETURN_MARKER_XOR {
+						sb.WriteString(" (RETURN)")
+					} else {
+						sb.WriteString(" (JUMP)")
+					}
+					sb.WriteString("\n")
+				}
+			}
+		}
+	}
+
+	return sb.String()
 }

@@ -452,6 +452,7 @@ func (c *Corpus) AddTestResultCallSequence(callSequence calls.CallSequence, muta
 // and the Corpus coverage maps are updated accordingly.
 // Returns an error if one occurs.
 func (c *Corpus) CheckSequenceCoverageAndUpdate(callSequence calls.CallSequence, mutationChooserWeight *big.Int, flushImmediately bool) error {
+	fmt.Println("\nMedusa: CheckSequenceCoverageAndUpdate\n")
 	// If we have coverage-guided fuzzing disabled or no calls in our sequence, there is nothing to do.
 	if len(callSequence) == 0 {
 		return nil
@@ -461,8 +462,10 @@ func (c *Corpus) CheckSequenceCoverageAndUpdate(callSequence calls.CallSequence,
 	lastCall := callSequence[len(callSequence)-1]
 	lastCallChainReference := lastCall.ChainReference
 	lastMessageResult := lastCallChainReference.Block.MessageResults[lastCallChainReference.TransactionIndex]
-	lastMessageCoverageMaps := coverage.GetCoverageTracerResults(lastMessageResult)
 
+	lastMessageCoverageMaps := coverage.GetCoverageTracerResults(lastMessageResult)
+	fmt.Println("\nMedusa: lastMessageCoverageMaps\n")
+	fmt.Println(lastMessageCoverageMaps.DebugString())
 	// If we have none, because a coverage tracer wasn't attached when processing this call, we can stop.
 	if lastMessageCoverageMaps == nil {
 		return nil
@@ -470,15 +473,18 @@ func (c *Corpus) CheckSequenceCoverageAndUpdate(callSequence calls.CallSequence,
 
 	// Memory optimization: Remove them from the results now that we obtained them, to free memory later.
 	coverage.RemoveCoverageTracerResults(lastMessageResult)
-
+	// fmt.Println("Medusa: coverage before update")
+	// fmt.Println(c.coverageMaps.DebugString())
 	// Merge the coverage maps into our total coverage maps and check if we had an update.
 	coverageUpdated, err := c.coverageMaps.Update(lastMessageCoverageMaps)
 	if err != nil {
 		return err
 	}
-
+	// fmt.Println("Medusa: coverage after update")
+	// fmt.Println(c.coverageMaps.DebugString())
 	// If we had an increase in coverage, we save the sequence.
 	if coverageUpdated {
+		fmt.Println("\nMedusa: coverage updated\n")
 		// If we achieved new coverage, save this sequence for mutation purposes.
 		err = c.addCallSequence(c.callSequenceFiles, callSequence, true, mutationChooserWeight, flushImmediately)
 		if err != nil {
@@ -560,7 +566,8 @@ func (c *Corpus) CheckGPUCoverageAndUpdate(
 
 	// Track if any coverage was updated across all instances
 	// coverageUpdated := false
-
+	fmt.Println("Medusa: coveragemaps before gpu update")
+	fmt.Println(c.coverageMaps.DebugString())
 	// Process each GPU instance's coverage with its success flag
 	for i, instanceCoverage := range gpuResults.Coverage {
 		isSuccessful := false
@@ -574,6 +581,8 @@ func (c *Corpus) CheckGPUCoverageAndUpdate(
 		if err != nil {
 			return err
 		}
+		fmt.Println("Medusa: coveragemaps after gpu update")
+		fmt.Println(c.coverageMaps.DebugString())
 
 		// Track if any instance updated coverage
 		// coverageUpdated = coverageUpdated || instanceUpdated

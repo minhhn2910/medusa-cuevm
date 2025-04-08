@@ -71,6 +71,7 @@ int run_interpreter_go(const char* json_input, uint32_t skip_trace_parsing, uint
                        uint32_t reuse_state_data);
 
 					   // Define C-compatible structures that can be shared with Go
+// Define C-compatible structures that can be shared with Go
 typedef struct {
     uint8_t* data;  // Pointer to the return data
     uint32_t length;  // Length of the return data
@@ -80,13 +81,13 @@ typedef struct {
     char** addresses;  // Array of contract addresses as strings
     uint32_t num_addresses;  // Number of addresses
 
-    uint8_t** pc_coverage;  // Array of PC coverage arrays
-    uint32_t* pc_coverage_lengths;  // Length of each PC coverage array
+    uint64_t** branch_coverage;  // Array of branch coverage arrays
+    uint32_t* branch_coverage_lengths;  // Length of each branch coverage array
 } CoverageDataEntry;
 
 typedef struct {
     ReturnDataEntry* return_data;  // Array of return data entries
-    uint32_t num_return_data;  // Number of return data entries
+    uint32_t num_return_data;  // Number of7 return data entries
     CoverageDataEntry* coverage;  // Array of coverage data entries
     uint32_t num_coverage;  // Number of coverage entries
     uint8_t* success_status;
@@ -785,6 +786,7 @@ func (f *Fuzzer) spawnWorkersLoop(baseTestChain *chain.TestChain) error {
 		if workersCancelled {
 			working = false
 		}
+
 		working = false
 	}
 
@@ -1164,8 +1166,8 @@ func (f *Fuzzer) runTransactionsGPU(callSequenceElements []*calls.CallSequenceEl
 	for i := 0; i < int(cResult.num_coverage); i++ {
 		cCov := coverageSlice[i]
 		coverage := coverage.GPUCoverage{
-			Addresses:  make([]string, int(cCov.num_addresses)),
-			PCCoverage: make([][]uint, int(cCov.num_addresses)),
+			Addresses:       make([]string, int(cCov.num_addresses)),
+			BranchCoverages: make([][]uint64, int(cCov.num_addresses)),
 		}
 
 		// Process addresses
@@ -1173,23 +1175,24 @@ func (f *Fuzzer) runTransactionsGPU(callSequenceElements []*calls.CallSequenceEl
 		for j := 0; j < int(cCov.num_addresses); j++ {
 			coverage.Addresses[j] = C.GoString(addressesSlice[j])
 
-			// Process PC coverage for this address
+			// Process branch coverage for this address
 			if j < int(cCov.num_addresses) {
-				pcCovSlice := unsafe.Slice(cCov.pc_coverage, int(cCov.num_addresses))
-				pcCovLengthsSlice := unsafe.Slice(cCov.pc_coverage_lengths, int(cCov.num_addresses))
+				branchCovSlice := unsafe.Slice(cCov.branch_coverage, int(cCov.num_addresses))
+				branchCovLengthsSlice := unsafe.Slice(cCov.branch_coverage_lengths, int(cCov.num_addresses))
 
-				if pcCovSlice[j] != nil {
-					length := pcCovLengthsSlice[j]
-					pcCov := make([]uint, int(length))
+				if branchCovSlice[j] != nil {
+					length := branchCovLengthsSlice[j]
+					// Directly create a slice of uint64 markers
+					markers := make([]uint64, int(length))
 
-					// Convert byte array to uint array
-					cPCCov := unsafe.Slice(pcCovSlice[j], int(length))
+					// Copy the 64-bit markers directly
+					cMarkers := unsafe.Slice((*uint64)(unsafe.Pointer(branchCovSlice[j])), int(length))
 					for k := 0; k < int(length); k++ {
-						if cPCCov[k] != 0 {
-							pcCov[k] = 1
+						if cMarkers[k] != 0 { // Only include non-zero markers
+							markers[k] = uint64(cMarkers[k])
 						}
 					}
-					coverage.PCCoverage[j] = pcCov
+					coverage.BranchCoverages[j] = markers
 				}
 			}
 		}
@@ -1397,25 +1400,12 @@ func (f *Fuzzer) launchGPUKernel() error {
 		}
 	}
 
-	// loop and print data
-	fmt.Println("call data before GPU")
-	for i := 0; i < len(f.workers); i++ {
-		worker := f.workers[i]
-		fmt.Println("worker: ", i)
-		for _, element := range worker.callSequenceElements {
-			fmt.Println("from: ", element.Call.From)
-			fmt.Println("to: ", element.Call.To)
-			fmt.Println("value: ", element.Call.Value)
-			fmt.Println("gas limit: ", element.Call.GasLimit)
-			fmt.Println("gas price: ", element.Call.GasPrice)
-			fmt.Println("nonce: ", element.Call.Nonce)
-			fmt.Printf("data: %x\n", element.Call.Data)
-			fmt.Println("--------------------------------")
-		}
-
-		// run in GPU
-		// Process transaction data in GPU
+	// Initialize a slice to hold the growing call sequences for each worker
+	allCallSequences := make([]calls.CallSequence, len(f.workers))
+	for i := range allCallSequences {
+		allCallSequences[i] = make(calls.CallSequence, 0)
 	}
+
 	// Process one element at a time from each worker
 	for elementIdx := 0; elementIdx < len(f.workers[0].callSequenceElements); elementIdx++ {
 		// Collect one element from each worker that has an element at this index
@@ -1431,42 +1421,32 @@ func (f *Fuzzer) launchGPUKernel() error {
 		// If we collected any elements, process them
 		if len(elementsToProcess) > 0 {
 			gpuResults, err := f.runTransactionsGPU(elementsToProcess)
-			// if err != nil {
-			// 	f.logger.Warn(fmt.Sprintf("Failed to process transaction data for element index %d in GPU", elementIdx), err)
-			// }
-
-			// Add new code to process GPU execution results
-			// gpuResults, err := f.getGPUExecutionResults()
 			if err != nil {
 				f.logger.Warn("Failed to get GPU execution results", err)
 			} else if gpuResults != nil {
+				// Build the call sequences incrementally and collect weights
 
-				// Collect all valid call sequences outside the loop
-				var workerSequences []calls.CallSequence
 				var workerWeights []*big.Int
+
 				for i, worker := range f.workers {
-					if i < len(gpuResults.ReturnData) {
-						// The return data can be used to update the worker's value set if needed
-						if len(gpuResults.ReturnData[i]) > 0 && worker != nil && len(worker.callSequenceElements) > 0 {
-							// Use type conversion instead of copying each element
-							workerSequences = append(workerSequences, calls.CallSequence(worker.callSequenceElements))
-							// Get the weight for this worker's sequence
-							workerWeights = append(workerWeights, worker.getNewCorpusCallSequenceWeight())
-						}
+					if worker != nil && elementIdx < len(worker.callSequenceElements) {
+						// Add the current element to this worker's growing sequence
+						allCallSequences[i] = append(allCallSequences[i], elementsToProcess[i])
+
+						workerWeights = append(workerWeights, worker.getNewCorpusCallSequenceWeight())
 					}
 				}
 
-				// Now use the collected sequences outside the loop
-				if len(workerSequences) > 0 {
-					err = f.corpus.CheckGPUCoverageAndUpdate(
-						gpuResults,
-						f.contractAddressToCodeHash,
-						workerSequences,
-						workerWeights, // Pass array of weights instead of single weight
-						true)
-					if err != nil {
-						return err
-					}
+				fmt.Println("Medusa: workerWeights: ", workerWeights, "length: ", len(workerWeights))
+
+				err = f.corpus.CheckGPUCoverageAndUpdate(
+					gpuResults,
+					f.contractAddressToCodeHash,
+					allCallSequences,
+					workerWeights,
+					true)
+				if err != nil {
+					return err
 				}
 
 			}
@@ -1474,8 +1454,8 @@ func (f *Fuzzer) launchGPUKernel() error {
 
 		// debug, stop here
 		break
-
 	}
+
 	// Now process transaction data for each worker
 	for i := 0; i < len(f.workers); i++ {
 		worker := f.workers[i]
