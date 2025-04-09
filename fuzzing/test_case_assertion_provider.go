@@ -9,6 +9,7 @@ import (
 	"github.com/crytic/medusa/fuzzing/calls"
 	"github.com/crytic/medusa/fuzzing/config"
 	"github.com/crytic/medusa/fuzzing/contracts"
+	"github.com/crytic/medusa/fuzzing/coverage"
 
 	"golang.org/x/exp/slices"
 )
@@ -67,6 +68,10 @@ func (t *AssertionTestCaseProvider) checkAssertionFailures(callSequence calls.Ca
 	// have a panic code.
 	lastExecutionResult := lastCall.ChainReference.MessageResults().ExecutionResult
 	panicCode := abiutils.GetSolidityPanicCode(lastExecutionResult.Err, lastExecutionResult.ReturnData, true)
+	fmt.Printf("CuEVM debug: Assertion check - Error: %v, ReturnData: %v, PanicCode: %v\n",
+		lastExecutionResult.Err,
+		lastExecutionResult.ReturnData,
+		panicCode)
 	failure := false
 	if panicCode != nil {
 		failure = encounteredAssertionFailure(panicCode.Uint64(), t.fuzzer.config.Fuzzing.Testing.AssertionTesting.PanicCodeConfig)
@@ -229,6 +234,101 @@ func (t *AssertionTestCaseProvider) callSequencePostCallTest(worker *FuzzerWorke
 	}
 
 	return shrinkRequests, nil
+}
+
+// GPUPostCallTest provides is a CallSequenceTestFunc that performs post-call testing logic for the attached Fuzzer
+// and any underlying FuzzerWorker. It is called after every call made in a call sequence. It checks whether invariants
+// in methods to test are upheld after each call the Fuzzer makes when testing a call sequence.
+func (t *AssertionTestCaseProvider) GPUPostCallTest(workers []*FuzzerWorker, callSequences []calls.CallSequence, gpuResult *coverage.GPUExecutionResult) (bool, error) {
+	fmt.Println("CuEVM Debug: callSequencePostCallTest, len call sequence , length gpuResult", len(callSequences), len(gpuResult.Success))
+	// Create a list of shrink call sequence verifiers, which we populate for each failed test we want a call sequence
+	// shrunk for.
+	shrink_requests_added := false
+	// Obtain the method ID for the last call and check if it encountered assertion failures.
+	// methodId, testFailed, err := t.checkAssertionFailures(callSequence)
+	for idx, callSequence := range callSequences {
+		shrinkRequests := make([]ShrinkCallSequenceRequest, 0)
+		// Obtain the contract and method from the last call made in our sequence
+		lastCall := callSequence[len(callSequence)-1]
+		lastCallMethod, err := lastCall.Method()
+		if err != nil {
+			continue
+		}
+		methodId := contracts.GetContractMethodID(lastCall.Contract, lastCallMethod)
+
+		// lastExecutionResult := lastCall.ChainReference.MessageResults().ExecutionResult
+		// panicCode := abiutils.GetSolidityPanicCode(lastExecutionResult.Err, lastExecutionResult.ReturnData, true)
+		// CUEVM simply check success flag for now
+		var panicCode *big.Int
+		if !gpuResult.Success[idx] {
+			panicCode = big.NewInt(1)
+		}
+
+		testFailed := false
+		if panicCode != nil {
+			testFailed = encounteredAssertionFailure(panicCode.Uint64(), t.fuzzer.config.Fuzzing.Testing.AssertionTesting.PanicCodeConfig)
+		}
+
+		// Obtain the test case for this method we're targeting for assertion testing.
+		t.testCasesLock.Lock()
+		testCase, testCaseExists := t.testCases[methodId]
+		t.testCasesLock.Unlock()
+		fmt.Println("CuEVM Debug: testCase", testCase, "testCaseExists", testCaseExists)
+		// Verify a test case exists for this method called (if we're not assertion testing this method, stop)
+		if !testCaseExists {
+			continue
+		}
+
+		// If the test case already failed, skip it
+		if testCase.Status() == TestCaseStatusFailed {
+			continue
+		}
+
+		// If we failed a test, we update our state immediately. We provide a shrink verifier which will update
+		// the call sequence for each shrunken sequence provided that fails the test.
+		if testFailed {
+			// Create a request to shrink this call sequence.
+			shrinkRequest := ShrinkCallSequenceRequest{
+				TestName:             testCase.Name(),
+				CallSequenceToShrink: callSequence,
+				VerifierFunction: func(worker *FuzzerWorker, shrunkenCallSequence calls.CallSequence) (bool, error) {
+					// Obtain the method ID for the last call and check if it encountered assertion failures.
+					shrunkSeqMethodId, shrunkSeqTestFailed, err := t.checkAssertionFailures(shrunkenCallSequence)
+					if err != nil {
+						return false, err
+					}
+
+					// If we encountered assertion failures on the same method, this shrunk sequence is satisfactory.
+					return shrunkSeqTestFailed && methodId == *shrunkSeqMethodId, nil
+				},
+				FinishedCallback: func(worker *FuzzerWorker, shrunkenCallSequence calls.CallSequence, verbosity config.VerbosityLevel) error {
+					// When we're finished shrinking, attach an execution trace to the last call. If verboseTracing is true, attach to all calls.
+					if len(shrunkenCallSequence) > 0 {
+						_, err = calls.ExecuteCallSequenceWithExecutionTracer(worker.chain, worker.fuzzer.contractDefinitions, shrunkenCallSequence, verbosity)
+						if err != nil {
+							return err
+						}
+					}
+
+					// Update our test state and report it finalized.
+					testCase.status = TestCaseStatusFailed
+					testCase.callSequence = &shrunkenCallSequence
+					worker.workerMetrics().failedSequences.Add(worker.workerMetrics().failedSequences, big.NewInt(1))
+					worker.Fuzzer().ReportTestCaseFinished(testCase)
+					return nil
+				},
+				RecordResultInCorpus: true,
+			}
+
+			// Add our shrink request to our list.
+			shrinkRequests = append(shrinkRequests, shrinkRequest)
+			shrink_requests_added = true
+		}
+		workers[idx].pendingShrinkRequests = append(workers[idx].pendingShrinkRequests, shrinkRequests...)
+		workers[idx].workerMetrics().callsTested.Add(workers[idx].workerMetrics().callsTested, big.NewInt(1))
+		workers[idx].workerMetrics().gasUsed.Add(workers[idx].workerMetrics().gasUsed, new(big.Int).SetUint64(100000)) //todo gas used
+	}
+	return shrink_requests_added, nil
 }
 
 // encounteredAssertionFailure takes in a panic code and a config.AssertionModesConfig and will determine whether the

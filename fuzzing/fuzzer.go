@@ -180,6 +180,10 @@ type Fuzzer struct {
 
 	// contractAddressToCodeHash maps contract addresses to their runtime bytecode hashes for quick lookup
 	contractAddressToCodeHash map[common.Address]common.Hash
+	// CuEVM debug: for directly calling in fuzzing loop
+	property_test_provider     *PropertyTestCaseProvider
+	assertion_test_provider    *AssertionTestCaseProvider
+	optimization_test_provider *OptimizationTestCaseProvider
 }
 
 // Amount of time between "total PCs hit" log messages. This message is only output when debug logging is enabled.
@@ -293,13 +297,13 @@ func NewFuzzer(config config.ProjectConfig) (*Fuzzer, error) {
 
 	// Register any default providers if specified.
 	if fuzzer.config.Fuzzing.Testing.PropertyTesting.Enabled {
-		attachPropertyTestCaseProvider(fuzzer)
+		fuzzer.property_test_provider = attachPropertyTestCaseProvider(fuzzer)
 	}
 	if fuzzer.config.Fuzzing.Testing.AssertionTesting.Enabled {
-		attachAssertionTestCaseProvider(fuzzer)
+		fuzzer.assertion_test_provider = attachAssertionTestCaseProvider(fuzzer)
 	}
 	if fuzzer.config.Fuzzing.Testing.OptimizationTesting.Enabled {
-		attachOptimizationTestCaseProvider(fuzzer)
+		fuzzer.optimization_test_provider = attachOptimizationTestCaseProvider(fuzzer)
 	}
 	return fuzzer, nil
 }
@@ -758,7 +762,7 @@ func (f *Fuzzer) spawnWorkersLoop(baseTestChain *chain.TestChain) error {
 			return err
 		}
 	}
-
+	loopCounter := 0
 	// Main processing loop
 	working := true
 	for working && !utils.CheckContextDone(f.ctx) {
@@ -787,9 +791,15 @@ func (f *Fuzzer) spawnWorkersLoop(baseTestChain *chain.TestChain) error {
 			working = false
 		}
 
-		working = false
-	}
+		loopCounter++
+		// if loopCounter == 2 {
+		// 	working = false
+		// }
+		fmt.Printf("\n Medusa loop counter: %d\n", loopCounter)
 
+	}
+	fmt.Println("Medusa Coverage after fuzzing")
+	fmt.Println(f.corpus.CoverageMaps().DebugString())
 	// Clean up workers
 	for i := 0; i < len(f.workers); i++ {
 		worker := f.workers[i]
@@ -1437,7 +1447,7 @@ func (f *Fuzzer) launchGPUKernel() error {
 					}
 				}
 
-				fmt.Println("Medusa: workerWeights: ", workerWeights, "length: ", len(workerWeights))
+				// fmt.Println("Medusa: workerWeights: ", workerWeights, "length: ", len(workerWeights))
 
 				err = f.corpus.CheckGPUCoverageAndUpdate(
 					gpuResults,
@@ -1445,36 +1455,46 @@ func (f *Fuzzer) launchGPUKernel() error {
 					allCallSequences,
 					workerWeights,
 					true)
-				if err != nil {
+
+				if err != nil || f.assertion_test_provider == nil {
+					fmt.Println("CuEVM Debug: assertion_test_provider is nil or error in CheckGPUCoverageAndUpdate")
 					return err
 				}
 
+				to_break, err := f.assertion_test_provider.GPUPostCallTest(f.workers, allCallSequences, gpuResults)
+				if err != nil {
+					return err
+				}
+				// fmt.Println("CuEVM Debug: to_break", to_break)
+				// If our fuzzer context or the emergency context is cancelled, exit out immediately without results.
+				if utils.CheckContextDone(f.ctx) || to_break {
+					fmt.Println("\n\nCuEVM Debug: context done or to_break\n\n")
+					return nil
+				}
 			}
 		}
 
-		// debug, stop here
-		break
 	}
 
 	// Now process transaction data for each worker
-	for i := 0; i < len(f.workers); i++ {
-		worker := f.workers[i]
-		if worker == nil || worker.chain == nil {
-			continue
-		}
+	// for i := 0; i < len(f.workers); i++ {
+	// 	worker := f.workers[i]
+	// 	if worker == nil || worker.chain == nil {
+	// 		continue
+	// 	}
 
-		// Check if we should stop execution
-		if utils.CheckContextDone(f.emergencyCtx) || utils.CheckContextDone(f.ctx) {
-			break
-		}
+	// 	// Check if we should stop execution
+	// 	if utils.CheckContextDone(f.emergencyCtx) || utils.CheckContextDone(f.ctx) {
+	// 		break
+	// 	}
 
-		// Execute the call sequence using the prepared list of elements (keeping existing code)
-		_, worker.lastExecutionError = calls.SimulateExecuteCallSequenceGPUWithList(
-			worker.chain,
-			worker.callSequenceElements,
-			worker.executionCheckFunc,
-		)
-	}
+	// 	// Execute the call sequence using the prepared list of elements (keeping existing code)
+	// 	_, worker.lastExecutionError = calls.SimulateExecuteCallSequenceGPUWithList(
+	// 		worker.chain,
+	// 		worker.callSequenceElements,
+	// 		worker.executionCheckFunc,
+	// 	)
+	// }
 
 	return nil
 }

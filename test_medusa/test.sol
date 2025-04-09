@@ -19,7 +19,7 @@ contract Test {
         // return (counter - tmp);
     }
     function bug() public {
-        assert (counter <= 3);
+        assert (counter < 3);
     }
 
     function bug2() public {

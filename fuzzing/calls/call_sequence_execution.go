@@ -457,8 +457,8 @@ func SimulateExecuteCallSequenceGPUWithList(
 		}
 
 		fmt.Println("\nSimulateExecuteCallSequenceGPUWithList after executionCheckFunc\n")
-		// debugging stop here
-		break
+		// CuEVM debug, stop here
+		// break
 
 	}
 

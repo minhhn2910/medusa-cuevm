@@ -389,6 +389,7 @@ func (c *Corpus) Initialize(baseTestChain *chain.TestChain, contractDefinitions 
 // addCallSequence adds a call sequence to the corpus in a given corpus directory.
 // Returns an error, if one occurs.
 func (c *Corpus) addCallSequence(sequenceFiles *corpusDirectory[calls.CallSequence], sequence calls.CallSequence, useInMutations bool, mutationChooserWeight *big.Int, flushImmediately bool) error {
+	fmt.Println("\n\nMedusa: addCallSequence, current files number: ", len(sequenceFiles.files), "\n\n")
 	// Acquire a thread lock during modification of call sequence lists.
 	c.callSequencesLock.Lock()
 
@@ -566,8 +567,8 @@ func (c *Corpus) CheckGPUCoverageAndUpdate(
 
 	// Track if any coverage was updated across all instances
 	// coverageUpdated := false
-	fmt.Println("Medusa: coveragemaps before gpu update")
-	fmt.Println(c.coverageMaps.DebugString())
+	// fmt.Println("Medusa: coveragemaps before gpu update")
+	// fmt.Println(c.coverageMaps.DebugString())
 	// Process each GPU instance's coverage with its success flag
 	for i, instanceCoverage := range gpuResults.Coverage {
 		isSuccessful := false
@@ -581,8 +582,8 @@ func (c *Corpus) CheckGPUCoverageAndUpdate(
 		if err != nil {
 			return err
 		}
-		fmt.Println("Medusa: coveragemaps after gpu update")
-		fmt.Println(c.coverageMaps.DebugString())
+		// fmt.Println("Medusa: coveragemaps after gpu update")
+		// fmt.Println(c.coverageMaps.DebugString())
 
 		// Track if any instance updated coverage
 		// coverageUpdated = coverageUpdated || instanceUpdated

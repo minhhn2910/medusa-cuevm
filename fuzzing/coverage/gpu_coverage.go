@@ -22,8 +22,8 @@ type GPUCoverage struct {
 // UpdateCoverageFromGPU updates the coverage maps with data returned from GPU execution
 func (cm *CoverageMaps) UpdateCoverageFromGPU(codeHashMap map[common.Address]common.Hash, gpuCoverage GPUCoverage, isSuccessful bool) (bool, error) {
 	fmt.Println("(cm *CoverageMaps) UpdateCoverageFromGPU")
-	fmt.Println("gpuCoverage: ", gpuCoverage)
-	fmt.Println("isSuccessful: ", isSuccessful)
+	// fmt.Println("gpuCoverage: ", gpuCoverage)
+	// fmt.Println("isSuccessful: ", isSuccessful)
 	// Acquire our thread lock and defer our unlocking for when we exit this method
 	cm.updateLock.Lock()
 	defer cm.updateLock.Unlock()
@@ -38,7 +38,7 @@ func (cm *CoverageMaps) UpdateCoverageFromGPU(codeHashMap map[common.Address]com
 
 	// Process each address and its coverage
 	for i, addrStr := range gpuCoverage.Addresses {
-		fmt.Println("(cm *CoverageMaps) UpdateCoverageFromGPU addrStr: ", addrStr)
+		// fmt.Println("(cm *CoverageMaps) UpdateCoverageFromGPU addrStr: ", addrStr)
 		if i >= len(gpuCoverage.BranchCoverages) {
 			break // Safety check
 		}
@@ -54,7 +54,7 @@ func (cm *CoverageMaps) UpdateCoverageFromGPU(codeHashMap map[common.Address]com
 
 		// Get code hash for this address from the provided map
 		codeHash, exists := codeHashMap[addr]
-		fmt.Println("code hash, addr: ", codeHash, addr)
+		// fmt.Println("code hash, addr: ", codeHash, addr)
 		if !exists {
 			// Skip addresses that don't have a code hash mapping
 			continue
