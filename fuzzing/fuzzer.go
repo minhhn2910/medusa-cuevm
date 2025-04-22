@@ -90,7 +90,7 @@ typedef struct {
     uint32_t num_return_data;  // Number of7 return data entries
     CoverageDataEntry* coverage;  // Array of coverage data entries
     uint32_t num_coverage;  // Number of coverage entries
-    uint8_t* success_status;
+    uint8_t* error_codes;
 } GPUExecutionResultC;
 
 // Updated function declaration with reuse_state_data parameter
@@ -1155,7 +1155,7 @@ func (f *Fuzzer) runTransactionsGPU(callSequenceElements []*calls.CallSequenceEl
 	result := &coverage.GPUExecutionResult{
 		ReturnData: make([][]byte, int(cResult.num_return_data)),
 		Coverage:   make([]coverage.GPUCoverage, int(cResult.num_coverage)),
-		Success:    make([]bool, int(cResult.num_return_data)),
+		ErrorCodes: make([]uint8, int(cResult.num_return_data)),
 	}
 
 	// Process return data
@@ -1210,17 +1210,17 @@ func (f *Fuzzer) runTransactionsGPU(callSequenceElements []*calls.CallSequenceEl
 		result.Coverage[i] = coverage
 	}
 	// Process success status
-	if cResult.success_status != nil && cResult.num_return_data > 0 {
-		successSlice := unsafe.Slice(cResult.success_status, int(cResult.num_return_data))
+	if cResult.error_codes != nil && cResult.num_return_data > 0 {
+		errorCodesSlice := unsafe.Slice(cResult.error_codes, int(cResult.num_return_data))
 		for i := 0; i < int(cResult.num_return_data); i++ {
-			result.Success[i] = (successSlice[i] == 1) // Convert C uint8_t (0 or 1) to Go bool
-			fmt.Printf("Go: Instance %d, Success = %v\n", i, result.Success[i])
+			result.ErrorCodes[i] = uint8(errorCodesSlice[i])
+			fmt.Printf("Go: Instance %d, ErrorCode = %v\n", i, result.ErrorCodes[i])
 		}
 	} else {
 		fmt.Println("Go: No success status data received from C.")
 		// Fill with default false if needed, though it should match num_return_data
-		for i := 0; i < len(result.Success); i++ {
-			result.Success[i] = false
+		for i := 0; i < len(result.ErrorCodes); i++ {
+			result.ErrorCodes[i] = 0
 		}
 	}
 
@@ -1430,6 +1430,7 @@ func (f *Fuzzer) launchGPUKernel() error {
 
 		// If we collected any elements, process them
 		if len(elementsToProcess) > 0 {
+
 			gpuResults, err := f.runTransactionsGPU(elementsToProcess)
 			if err != nil {
 				f.logger.Warn("Failed to get GPU execution results", err)
@@ -1472,6 +1473,7 @@ func (f *Fuzzer) launchGPUKernel() error {
 					return nil
 				}
 			}
+
 		}
 
 	}

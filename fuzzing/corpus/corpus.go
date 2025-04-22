@@ -571,14 +571,9 @@ func (c *Corpus) CheckGPUCoverageAndUpdate(
 	// fmt.Println(c.coverageMaps.DebugString())
 	// Process each GPU instance's coverage with its success flag
 	for i, instanceCoverage := range gpuResults.Coverage {
-		isSuccessful := false
-		// Make sure we have corresponding success data
-		if i < len(gpuResults.Success) {
-			isSuccessful = gpuResults.Success[i]
-		}
 
 		// Update coverage for this instance
-		instanceUpdated, err := c.coverageMaps.UpdateCoverageFromGPU(codeHashMap, instanceCoverage, isSuccessful)
+		instanceUpdated, err := c.coverageMaps.UpdateCoverageFromGPU(codeHashMap, instanceCoverage)
 		if err != nil {
 			return err
 		}

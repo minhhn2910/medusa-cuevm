@@ -14,6 +14,10 @@ import (
 	"golang.org/x/exp/slices"
 )
 
+const (
+	CUEVM_INVALID_ERROR_CODE = 0x0B
+)
+
 // AssertionTestCaseProvider is am AssertionTestCase provider which spawns test cases for every contract method and
 // ensures that none of them result in a failed assertion (e.g. use of the solidity `assert(...)` statement, or special
 // events indicating a failed assertion).
@@ -240,7 +244,7 @@ func (t *AssertionTestCaseProvider) callSequencePostCallTest(worker *FuzzerWorke
 // and any underlying FuzzerWorker. It is called after every call made in a call sequence. It checks whether invariants
 // in methods to test are upheld after each call the Fuzzer makes when testing a call sequence.
 func (t *AssertionTestCaseProvider) GPUPostCallTest(workers []*FuzzerWorker, callSequences []calls.CallSequence, gpuResult *coverage.GPUExecutionResult) (bool, error) {
-	fmt.Println("CuEVM Debug: callSequencePostCallTest, len call sequence , length gpuResult", len(callSequences), len(gpuResult.Success))
+	fmt.Println("CuEVM Debug: callSequencePostCallTest, len call sequence , length gpuResult", len(callSequences), len(gpuResult.ErrorCodes))
 	// Create a list of shrink call sequence verifiers, which we populate for each failed test we want a call sequence
 	// shrunk for.
 	shrink_requests_added := false
@@ -255,12 +259,12 @@ func (t *AssertionTestCaseProvider) GPUPostCallTest(workers []*FuzzerWorker, cal
 			continue
 		}
 		methodId := contracts.GetContractMethodID(lastCall.Contract, lastCallMethod)
-
+		fmt.Println("CuEVM Debug: methodId", methodId, "error code", gpuResult.ErrorCodes[idx])
 		// lastExecutionResult := lastCall.ChainReference.MessageResults().ExecutionResult
 		// panicCode := abiutils.GetSolidityPanicCode(lastExecutionResult.Err, lastExecutionResult.ReturnData, true)
 		// CUEVM simply check success flag for now
 		var panicCode *big.Int
-		if !gpuResult.Success[idx] {
+		if gpuResult.ErrorCodes[idx] == CUEVM_INVALID_ERROR_CODE {
 			panicCode = big.NewInt(1)
 		}
 

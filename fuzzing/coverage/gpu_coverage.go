@@ -10,7 +10,7 @@ import (
 type GPUExecutionResult struct {
 	ReturnData [][]byte      `json:"returnData"`
 	Coverage   []GPUCoverage `json:"coverage"`
-	Success    []bool        `json:"success"`
+	ErrorCodes []uint8       `json:"errorCodes"`
 }
 
 // GPUCoverage represents coverage data for a single GPU instance
@@ -20,10 +20,9 @@ type GPUCoverage struct {
 }
 
 // UpdateCoverageFromGPU updates the coverage maps with data returned from GPU execution
-func (cm *CoverageMaps) UpdateCoverageFromGPU(codeHashMap map[common.Address]common.Hash, gpuCoverage GPUCoverage, isSuccessful bool) (bool, error) {
+func (cm *CoverageMaps) UpdateCoverageFromGPU(codeHashMap map[common.Address]common.Hash, gpuCoverage GPUCoverage) (bool, error) {
 	fmt.Println("(cm *CoverageMaps) UpdateCoverageFromGPU")
 	// fmt.Println("gpuCoverage: ", gpuCoverage)
-	// fmt.Println("isSuccessful: ", isSuccessful)
 	// Acquire our thread lock and defer our unlocking for when we exit this method
 	cm.updateLock.Lock()
 	defer cm.updateLock.Unlock()
