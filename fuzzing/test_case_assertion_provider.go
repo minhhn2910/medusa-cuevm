@@ -171,7 +171,7 @@ func (t *AssertionTestCaseProvider) onWorkerDeployedContractAdded(event FuzzerWo
 // and any underlying FuzzerWorker. It is called after every call made in a call sequence. It checks whether invariants
 // in methods to test are upheld after each call the Fuzzer makes when testing a call sequence.
 func (t *AssertionTestCaseProvider) callSequencePostCallTest(worker *FuzzerWorker, callSequence calls.CallSequence) ([]ShrinkCallSequenceRequest, error) {
-	fmt.Println("CuEVM Debug: callSequencePostCallTest")
+	// fmt.Println("CuEVM Debug: callSequencePostCallTest")
 	// Create a list of shrink call sequence verifiers, which we populate for each failed test we want a call sequence
 	// shrunk for.
 	shrinkRequests := make([]ShrinkCallSequenceRequest, 0)
@@ -186,7 +186,7 @@ func (t *AssertionTestCaseProvider) callSequencePostCallTest(worker *FuzzerWorke
 	t.testCasesLock.Lock()
 	testCase, testCaseExists := t.testCases[*methodId]
 	t.testCasesLock.Unlock()
-	fmt.Println("CuEVM Debug: testCase", testCase, "testCaseExists", testCaseExists)
+	// fmt.Println("CuEVM Debug: testCase", testCase, "testCaseExists", testCaseExists)
 	// Verify a test case exists for this method called (if we're not assertion testing this method, stop)
 	if !testCaseExists {
 		return shrinkRequests, nil
@@ -259,7 +259,7 @@ func (t *AssertionTestCaseProvider) GPUPostCallTest(workers []*FuzzerWorker, cal
 			continue
 		}
 		methodId := contracts.GetContractMethodID(lastCall.Contract, lastCallMethod)
-		fmt.Println("CuEVM Debug: methodId", methodId, "error code", gpuResult.ErrorCodes[idx])
+		// fmt.Println("CuEVM Debug: methodId", methodId, "error code", gpuResult.ErrorCodes[idx])
 		// lastExecutionResult := lastCall.ChainReference.MessageResults().ExecutionResult
 		// panicCode := abiutils.GetSolidityPanicCode(lastExecutionResult.Err, lastExecutionResult.ReturnData, true)
 		// CUEVM simply check success flag for now
@@ -277,7 +277,7 @@ func (t *AssertionTestCaseProvider) GPUPostCallTest(workers []*FuzzerWorker, cal
 		t.testCasesLock.Lock()
 		testCase, testCaseExists := t.testCases[methodId]
 		t.testCasesLock.Unlock()
-		fmt.Println("CuEVM Debug: testCase", testCase, "testCaseExists", testCaseExists)
+		// fmt.Println("CuEVM Debug: testCase", testCase, "testCaseExists", testCaseExists)
 		// Verify a test case exists for this method called (if we're not assertion testing this method, stop)
 		if !testCaseExists {
 			continue

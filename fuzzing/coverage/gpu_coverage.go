@@ -1,8 +1,6 @@
 package coverage
 
 import (
-	"fmt"
-
 	"github.com/crytic/medusa-geth/common"
 )
 
@@ -21,7 +19,7 @@ type GPUCoverage struct {
 
 // UpdateCoverageFromGPU updates the coverage maps with data returned from GPU execution
 func (cm *CoverageMaps) UpdateCoverageFromGPU(codeHashMap map[common.Address]common.Hash, gpuCoverage GPUCoverage) (bool, error) {
-	fmt.Println("(cm *CoverageMaps) UpdateCoverageFromGPU")
+	// fmt.Println("(cm *CoverageMaps) UpdateCoverageFromGPU")
 	// fmt.Println("gpuCoverage: ", gpuCoverage)
 	// Acquire our thread lock and defer our unlocking for when we exit this method
 	cm.updateLock.Lock()

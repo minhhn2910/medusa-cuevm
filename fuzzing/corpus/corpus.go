@@ -389,7 +389,7 @@ func (c *Corpus) Initialize(baseTestChain *chain.TestChain, contractDefinitions 
 // addCallSequence adds a call sequence to the corpus in a given corpus directory.
 // Returns an error, if one occurs.
 func (c *Corpus) addCallSequence(sequenceFiles *corpusDirectory[calls.CallSequence], sequence calls.CallSequence, useInMutations bool, mutationChooserWeight *big.Int, flushImmediately bool) error {
-	fmt.Println("\n\nMedusa: addCallSequence, current files number: ", len(sequenceFiles.files), "\n\n")
+	// fmt.Println("\n\nMedusa: addCallSequence, current files number: ", len(sequenceFiles.files), "\n\n")
 	// Acquire a thread lock during modification of call sequence lists.
 	c.callSequencesLock.Lock()
 

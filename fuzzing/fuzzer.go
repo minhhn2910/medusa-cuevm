@@ -798,8 +798,8 @@ func (f *Fuzzer) spawnWorkersLoop(baseTestChain *chain.TestChain) error {
 		fmt.Printf("\n Medusa loop counter: %d\n", loopCounter)
 
 	}
-	fmt.Println("Medusa Coverage after fuzzing")
-	fmt.Println(f.corpus.CoverageMaps().DebugString())
+	// fmt.Println("Medusa Coverage after fuzzing")
+	// fmt.Println(f.corpus.CoverageMaps().DebugString())
 	// Clean up workers
 	for i := 0; i < len(f.workers); i++ {
 		worker := f.workers[i]
@@ -879,8 +879,7 @@ func (f *Fuzzer) prepareWorkersDataInParallel(baseTestChain *chain.TestChain) (b
 
 			// Setup chain if this is the first run
 			if worker.chain == nil {
-				fmt.Println("worker.chain is nil, setting up worker chain")
-
+				// fmt.Println("worker.chain is nil, setting up worker chain")
 				var err error
 				worker.chain, err = baseTestChain.Clone(func(initializedChain *chain.TestChain) error {
 					// Subscribe our chain event handlers
@@ -901,7 +900,7 @@ func (f *Fuzzer) prepareWorkersDataInParallel(baseTestChain *chain.TestChain) (b
 						Worker: worker,
 						Chain:  initializedChain,
 					})
-					fmt.Println("error in fuzzer worker chain created clone", err)
+					// fmt.Println("error in fuzzer worker chain created clone", err)
 					return err
 				})
 
@@ -1159,63 +1158,100 @@ func (f *Fuzzer) runTransactionsGPU(callSequenceElements []*calls.CallSequenceEl
 	}
 
 	// Process return data
-	returnDataSlice := unsafe.Slice(cResult.return_data, int(cResult.num_return_data))
-	for i := 0; i < int(cResult.num_return_data); i++ {
-		cData := returnDataSlice[i]
-		if cData.data != nil && cData.length > 0 {
-			// Create a Go slice that directly references the C data
-			dataSlice := C.GoBytes(unsafe.Pointer(cData.data), C.int(cData.length))
-			result.ReturnData[i] = dataSlice
-		} else {
-			result.ReturnData[i] = []byte{}
-		}
-	}
+	// returnDataSlice := unsafe.Slice(cResult.return_data, int(cResult.num_return_data))
+	// for i := 0; i < int(cResult.num_return_data); i++ {
+	// 	cData := returnDataSlice[i]
+	// 	if cData.data != nil && cData.length > 0 {
+	// 		// Create a Go slice that directly references the C data
+	// 		dataSlice := C.GoBytes(unsafe.Pointer(cData.data), C.int(cData.length))
+	// 		result.ReturnData[i] = dataSlice
+	// 	} else {
+	// 		result.ReturnData[i] = []byte{}
+	// 	}
+	// }
 
 	// Process coverage data
 	coverageSlice := unsafe.Slice(cResult.coverage, int(cResult.num_coverage))
-	for i := 0; i < int(cResult.num_coverage); i++ {
-		cCov := coverageSlice[i]
-		coverage := coverage.GPUCoverage{
-			Addresses:       make([]string, int(cCov.num_addresses)),
-			BranchCoverages: make([][]uint64, int(cCov.num_addresses)),
-		}
+	numCoverage := int(cResult.num_coverage)
 
-		// Process addresses
-		addressesSlice := unsafe.Slice(cCov.addresses, int(cCov.num_addresses))
-		for j := 0; j < int(cCov.num_addresses); j++ {
-			coverage.Addresses[j] = C.GoString(addressesSlice[j])
+	// Pre-allocate the result array
+	result.Coverage = make([]coverage.GPUCoverage, numCoverage)
 
-			// Process branch coverage for this address
-			if j < int(cCov.num_addresses) {
-				branchCovSlice := unsafe.Slice(cCov.branch_coverage, int(cCov.num_addresses))
-				branchCovLengthsSlice := unsafe.Slice(cCov.branch_coverage_lengths, int(cCov.num_addresses))
+	// Create a wait group to wait for all goroutines
+	var wg sync.WaitGroup
 
-				if branchCovSlice[j] != nil {
-					length := branchCovLengthsSlice[j]
-					// Directly create a slice of uint64 markers
-					markers := make([]uint64, int(length))
+	// Determine number of workers based on available CPU cores
+	numWorkers := runtime.NumCPU()
+	if numWorkers > numCoverage {
+		numWorkers = numCoverage
+	}
 
-					// Copy the 64-bit markers directly
-					cMarkers := unsafe.Slice((*uint64)(unsafe.Pointer(branchCovSlice[j])), int(length))
-					for k := 0; k < int(length); k++ {
-						if cMarkers[k] != 0 { // Only include non-zero markers
-							markers[k] = uint64(cMarkers[k])
+	// Create a worker pool
+	workChan := make(chan int, numCoverage)
+
+	// Launch worker goroutines
+	for w := 0; w < numWorkers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range workChan {
+				cCov := coverageSlice[i]
+				coverage := coverage.GPUCoverage{
+					Addresses:       make([]string, int(cCov.num_addresses)),
+					BranchCoverages: make([][]uint64, int(cCov.num_addresses)),
+				}
+
+				// Process addresses
+				addressesSlice := unsafe.Slice(cCov.addresses, int(cCov.num_addresses))
+				for j := 0; j < int(cCov.num_addresses); j++ {
+					coverage.Addresses[j] = C.GoString(addressesSlice[j])
+
+					// Process branch coverage for this address
+					if j < int(cCov.num_addresses) {
+						branchCovSlice := unsafe.Slice(cCov.branch_coverage, int(cCov.num_addresses))
+						branchCovLengthsSlice := unsafe.Slice(cCov.branch_coverage_lengths, int(cCov.num_addresses))
+
+						if branchCovSlice[j] != nil {
+							length := branchCovLengthsSlice[j]
+							// Directly create a slice of uint64 markers
+							markers := make([]uint64, int(length))
+
+							// Copy the 64-bit markers directly
+							cMarkers := unsafe.Slice((*uint64)(unsafe.Pointer(branchCovSlice[j])), int(length))
+							for k := 0; k < int(length); k++ {
+								if cMarkers[k] != 0 { // Only include non-zero markers
+									markers[k] = uint64(cMarkers[k])
+								}
+							}
+							coverage.BranchCoverages[j] = markers
 						}
 					}
-					coverage.BranchCoverages[j] = markers
 				}
-			}
-		}
 
-		result.Coverage[i] = coverage
+				// Thread-safe assignment to result
+				result.Coverage[i] = coverage
+			}
+		}()
 	}
+
+	// Send work to the workers
+	for i := 0; i < numCoverage; i++ {
+		workChan <- i
+	}
+	close(workChan)
+
+	// Wait for all workers to finish
+	wg.Wait()
+
 	// Process success status
 	if cResult.error_codes != nil && cResult.num_return_data > 0 {
 		errorCodesSlice := unsafe.Slice(cResult.error_codes, int(cResult.num_return_data))
+		errorCodesStr := make([]string, int(cResult.num_return_data))
 		for i := 0; i < int(cResult.num_return_data); i++ {
 			result.ErrorCodes[i] = uint8(errorCodesSlice[i])
-			fmt.Printf("Go: Instance %d, ErrorCode = %v\n", i, result.ErrorCodes[i])
+			errorCodesStr[i] = fmt.Sprintf("%v", result.ErrorCodes[i])
 		}
+		fmt.Printf("Go: ErrorCodes = [%s]\n", strings.Join(errorCodesStr, ", "))
 	} else {
 		fmt.Println("Go: No success status data received from C.")
 		// Fill with default false if needed, though it should match num_return_data
@@ -1570,7 +1606,9 @@ func (f *Fuzzer) processWorkersResultsInParallel() (bool, error) {
 
 			// Update metrics
 			worker.workerMetrics().sequencesTested.Add(worker.workerMetrics().sequencesTested, big.NewInt(1))
-
+			worker.workerMetrics().callsTested.Add(worker.workerMetrics().callsTested, big.NewInt(int64(len(worker.callSequenceElements))))
+			// fmt.Println("CuEVM Debug: worker.workerMetrics().sequencesTested", worker.workerMetrics().sequencesTested)
+			// fmt.Println("CuEVM Debug: worker.workerMetrics().callsTested", worker.workerMetrics().callsTested)
 			// Check if we've reached the worker reset limit
 			sequencesTested := worker.workerMetrics().sequencesTested.Uint64()
 			if sequencesTested > uint64(worker.fuzzer.config.Fuzzing.WorkerResetLimit) {
