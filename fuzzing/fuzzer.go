@@ -880,39 +880,29 @@ func (f *Fuzzer) prepareWorkersDataInParallel(baseTestChain *chain.TestChain) (b
 			// Setup chain if this is the first run
 			if worker.chain == nil {
 				// fmt.Println("worker.chain is nil, setting up worker chain")
-				var err error
+				// var err error
 				worker.chain = baseTestChain
 
-				// Subscribe our chain event handlers
-				worker.chain.Events.ContractDeploymentAddedEventEmitter.Subscribe(worker.onChainContractDeploymentAddedEvent)
-				worker.chain.Events.ContractDeploymentRemovedEventEmitter.Subscribe(worker.onChainContractDeploymentRemovedEvent)
+				// // If we have coverage-guided fuzzing enabled, create a tracer to collect coverage and connect it to the chain
+				// if f.config.Fuzzing.CoverageEnabled {
+				// 	worker.coverageTracer = coverage.NewCoverageTracer()
+				// 	worker.chain.AddTracer(worker.coverageTracer.NativeTracer(), true, false)
+				// }
 
-				// If we have coverage-guided fuzzing enabled, create a tracer to collect coverage and connect it to the chain
-				if f.config.Fuzzing.CoverageEnabled {
-					worker.coverageTracer = coverage.NewCoverageTracer()
-					worker.chain.AddTracer(worker.coverageTracer.NativeTracer(), true, false)
-				}
+				// if err != nil {
+				// 	errChan <- err
+				// 	return
+				// }
 
-				// Emit an event indicating the worker has created its chain
-				err = worker.Events.FuzzerWorkerChainCreated.Publish(FuzzerWorkerChainCreatedEvent{
-					Worker: worker,
-					Chain:  worker.chain,
-				})
-
-				if err != nil {
-					errChan <- err
-					return
-				}
-
-				// Emit an event indicating the worker has set up its chain
-				err = worker.Events.FuzzerWorkerChainSetup.Publish(FuzzerWorkerChainSetupEvent{
-					Worker: worker,
-					Chain:  worker.chain,
-				})
-				if err != nil {
-					errChan <- fmt.Errorf("error returned by an event handler: %v", err)
-					return
-				}
+				// // Emit an event indicating the worker has set up its chain
+				// err = worker.Events.FuzzerWorkerChainSetup.Publish(FuzzerWorkerChainSetupEvent{
+				// 	Worker: worker,
+				// 	Chain:  worker.chain,
+				// })
+				// if err != nil {
+				// 	errChan <- fmt.Errorf("error returned by an event handler: %v", err)
+				// 	return
+				// }
 
 				// Increase our generation metric
 				worker.workerMetrics().workerStartupCount.Add(worker.workerMetrics().workerStartupCount, big.NewInt(1))
@@ -1032,6 +1022,29 @@ func (f *Fuzzer) prepareWorkersDataInParallel(baseTestChain *chain.TestChain) (b
 
 	// Wait for all workers to finish preparation
 	wg.Wait()
+
+	// Emit an event indicating the worker has created its chain
+	for i := range f.workers {
+		worker := f.workers[i]
+		worker.chain.Events.ContractDeploymentAddedEventEmitter.Subscribe(worker.onChainContractDeploymentAddedEvent)
+		worker.chain.Events.ContractDeploymentRemovedEventEmitter.Subscribe(worker.onChainContractDeploymentRemovedEvent)
+
+		if f.config.Fuzzing.CoverageEnabled {
+			worker.coverageTracer = coverage.NewCoverageTracer()
+			worker.chain.AddTracer(worker.coverageTracer.NativeTracer(), true, false)
+		}
+
+		err := worker.Events.FuzzerWorkerChainCreated.Publish(FuzzerWorkerChainCreatedEvent{
+			Worker: worker,
+			Chain:  worker.chain,
+		})
+
+		if err != nil {
+			return false, err
+		}
+
+	}
+
 	close(errChan)
 	close(cancelChan)
 
