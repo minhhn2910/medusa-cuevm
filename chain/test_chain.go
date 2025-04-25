@@ -276,15 +276,14 @@ func (t *TestChain) Close() {
 // Returns the new chain, or an error if one occurred.
 func (t *TestChain) Clone(onCreateFunc func(chain *TestChain) error) (*TestChain, error) {
 	// Create a new chain with the same genesis definition and config
-	// targetChain, err := newTestChainWithStateFactory(t.genesisDefinition.Alloc, t.testChainConfig, t.stateFactory)
-	// if err != nil {
-	// 	return nil, err
-	// }
-	targetChain := t
+	targetChain, err := newTestChainWithStateFactory(t.genesisDefinition.Alloc, t.testChainConfig, t.stateFactory)
+	if err != nil {
+		return nil, err
+	}
 
 	// If we have a provided function for our creation event, execute it now
 	if onCreateFunc != nil {
-		err := onCreateFunc(targetChain)
+		err = onCreateFunc(targetChain)
 		if err != nil {
 			return nil, fmt.Errorf("could not clone chain due to error: %v", err)
 		}
@@ -296,7 +295,7 @@ func (t *TestChain) Clone(onCreateFunc func(chain *TestChain) error) (*TestChain
 		// First create a new pending block to commit
 		block := t.blocks[i]
 		blockHeader := block.Header
-		_, err := targetChain.PendingBlockCreateWithBaseBlockContext(block.BaseContext, &blockHeader.GasLimit)
+		_, err = targetChain.PendingBlockCreateWithBaseBlockContext(block.BaseContext, &blockHeader.GasLimit)
 		if err != nil {
 			return nil, err
 		}

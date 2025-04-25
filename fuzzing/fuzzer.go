@@ -54,7 +54,7 @@ import (
 
 	// "github.com/ethereum/go-ethereum/accounts/abi"
 	// "github.com/ethereum/go-ethereum/common"
-	"golang.org/x/exp/maps"
+
 	"golang.org/x/exp/slices"
 )
 
@@ -881,27 +881,22 @@ func (f *Fuzzer) prepareWorkersDataInParallel(baseTestChain *chain.TestChain) (b
 			if worker.chain == nil {
 				// fmt.Println("worker.chain is nil, setting up worker chain")
 				var err error
-				worker.chain, err = baseTestChain.Clone(func(initializedChain *chain.TestChain) error {
-					// Subscribe our chain event handlers
-					initializedChain.Events.ContractDeploymentAddedEventEmitter.Subscribe(worker.onChainContractDeploymentAddedEvent)
-					initializedChain.Events.ContractDeploymentRemovedEventEmitter.Subscribe(worker.onChainContractDeploymentRemovedEvent)
+				worker.chain = baseTestChain
 
-					// If we have coverage-guided fuzzing enabled, create a tracer to collect coverage and connect it to the chain
-					if f.config.Fuzzing.CoverageEnabled {
-						worker.coverageTracer = coverage.NewCoverageTracer()
-						initializedChain.AddTracer(worker.coverageTracer.NativeTracer(), true, false)
-					}
+				// Subscribe our chain event handlers
+				worker.chain.Events.ContractDeploymentAddedEventEmitter.Subscribe(worker.onChainContractDeploymentAddedEvent)
+				worker.chain.Events.ContractDeploymentRemovedEventEmitter.Subscribe(worker.onChainContractDeploymentRemovedEvent)
 
-					// Copy the labels from the base chain to the worker's chain
-					initializedChain.Labels = maps.Clone(baseTestChain.Labels)
+				// If we have coverage-guided fuzzing enabled, create a tracer to collect coverage and connect it to the chain
+				if f.config.Fuzzing.CoverageEnabled {
+					worker.coverageTracer = coverage.NewCoverageTracer()
+					worker.chain.AddTracer(worker.coverageTracer.NativeTracer(), true, false)
+				}
 
-					// Emit an event indicating the worker has created its chain
-					err := worker.Events.FuzzerWorkerChainCreated.Publish(FuzzerWorkerChainCreatedEvent{
-						Worker: worker,
-						Chain:  initializedChain,
-					})
-					// fmt.Println("error in fuzzer worker chain created clone", err)
-					return err
+				// Emit an event indicating the worker has created its chain
+				err = worker.Events.FuzzerWorkerChainCreated.Publish(FuzzerWorkerChainCreatedEvent{
+					Worker: worker,
+					Chain:  worker.chain,
 				})
 
 				if err != nil {

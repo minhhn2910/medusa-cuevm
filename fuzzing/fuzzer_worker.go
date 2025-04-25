@@ -591,37 +591,36 @@ func (fw *FuzzerWorker) run(baseTestChain *chain.TestChain) (bool, error) {
 	// This means any tracers added or events subscribed to within this inner function are done so prior to chain
 	// setup (initial contract deployments), so data regarding that can be tracked as well.
 	var err error
-	fw.chain = baseTestChain
-	// fw.chain, err = baseTestChain.Clone(func(initializedChain *chain.TestChain) error {
-	// 	// Subscribe our chain event handlers
-	// 	initializedChain.Events.ContractDeploymentAddedEventEmitter.Subscribe(fw.onChainContractDeploymentAddedEvent)
-	// 	initializedChain.Events.ContractDeploymentRemovedEventEmitter.Subscribe(fw.onChainContractDeploymentRemovedEvent)
+	fw.chain, err = baseTestChain.Clone(func(initializedChain *chain.TestChain) error {
+		// Subscribe our chain event handlers
+		initializedChain.Events.ContractDeploymentAddedEventEmitter.Subscribe(fw.onChainContractDeploymentAddedEvent)
+		initializedChain.Events.ContractDeploymentRemovedEventEmitter.Subscribe(fw.onChainContractDeploymentRemovedEvent)
 
-	// 	if err != nil {
-	// 		return fmt.Errorf("error returned by an event handler when emitting a worker chain created event: %v", err)
-	// 	}
+		if err != nil {
+			return fmt.Errorf("error returned by an event handler when emitting a worker chain created event: %v", err)
+		}
 
-	// 	// If we have coverage-guided fuzzing enabled, create a tracer to collect coverage and connect it to the chain.
-	// 	if fw.fuzzer.config.Fuzzing.CoverageEnabled {
-	// 		fw.coverageTracer = coverage.NewCoverageTracer()
-	// 		initializedChain.AddTracer(fw.coverageTracer.NativeTracer(), true, false)
-	// 	}
+		// If we have coverage-guided fuzzing enabled, create a tracer to collect coverage and connect it to the chain.
+		if fw.fuzzer.config.Fuzzing.CoverageEnabled {
+			fw.coverageTracer = coverage.NewCoverageTracer()
+			initializedChain.AddTracer(fw.coverageTracer.NativeTracer(), true, false)
+		}
 
-	// 	// Copy the labels from the base chain to the worker's chain
-	// 	initializedChain.Labels = maps.Clone(baseTestChain.Labels)
+		// Copy the labels from the base chain to the worker's chain
+		initializedChain.Labels = maps.Clone(baseTestChain.Labels)
 
-	// 	// Emit an event indicating the worker has created its chain.
-	// 	err = fw.Events.FuzzerWorkerChainCreated.Publish(FuzzerWorkerChainCreatedEvent{
-	// 		Worker: fw,
-	// 		Chain:  initializedChain,
-	// 	})
-	// 	return nil
-	// })
+		// Emit an event indicating the worker has created its chain.
+		err = fw.Events.FuzzerWorkerChainCreated.Publish(FuzzerWorkerChainCreatedEvent{
+			Worker: fw,
+			Chain:  initializedChain,
+		})
+		return nil
+	})
 
-	// // If we encountered an error during cloning, return it.
-	// if err != nil {
-	// 	return false, err
-	// }
+	// If we encountered an error during cloning, return it.
+	if err != nil {
+		return false, err
+	}
 
 	// Defer the closing of the test chain object
 	defer fw.chain.Close()
