@@ -328,10 +328,12 @@ func (t *AssertionTestCaseProvider) GPUPostCallTest(workers []*FuzzerWorker, cal
 			shrinkRequests = append(shrinkRequests, shrinkRequest)
 			shrink_requests_added = true
 		}
-		workers[idx].pendingShrinkRequests = append(workers[idx].pendingShrinkRequests, shrinkRequests...)
-		workers[idx].workerMetrics().callsTested.Add(workers[idx].workerMetrics().callsTested, big.NewInt(1))
-		workers[idx].workerMetrics().gasUsed.Add(workers[idx].workerMetrics().gasUsed, new(big.Int).SetUint64(100000)) //todo gas used
+		workerIdx := idx / t.fuzzer.sequencesPerCPUWorker
+		workers[workerIdx].pendingShrinkRequests = append(workers[workerIdx].pendingShrinkRequests, shrinkRequests...)
+		workers[workerIdx].workerMetrics().callsTested.Add(workers[workerIdx].workerMetrics().callsTested, big.NewInt(1))
+		workers[workerIdx].workerMetrics().gasUsed.Add(workers[workerIdx].workerMetrics().gasUsed, new(big.Int).SetUint64(100000)) //todo gas used
 	}
+	fmt.Println("\n\nCuEVM Debug: shrink_requests_added", shrink_requests_added)
 	return shrink_requests_added, nil
 }
 
