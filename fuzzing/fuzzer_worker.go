@@ -85,7 +85,8 @@ type FuzzerWorker struct {
 	// lastExecutionError holds any error from the last execution
 	lastExecutionError error
 
-	callSequenceElements []*calls.CallSequenceElement
+	// callSequenceElements []*calls.CallSequenceElement
+	callSequenceElements [][]*calls.CallSequenceElement
 }
 
 // newFuzzerWorker creates a new FuzzerWorker, assigning it the provided worker index/id and associating it to the

@@ -180,6 +180,9 @@ type Fuzzer struct {
 
 	// contractAddressToCodeHash maps contract addresses to their runtime bytecode hashes for quick lookup
 	contractAddressToCodeHash map[common.Address]common.Hash
+	// CuEVM: CPU workers is fixed to number of threads x 2
+	numCPUWorkers         int
+	sequencesPerCPUWorker int
 	// CuEVM debug: for directly calling in fuzzing loop
 	property_test_provider     *PropertyTestCaseProvider
 	assertion_test_provider    *AssertionTestCaseProvider
@@ -741,10 +744,10 @@ func defaultShrinkingValueMutatorFunc(fuzzer *Fuzzer, valueSet *valuegeneration.
 // This function exits when Fuzzer.ctx is cancelled.
 func (f *Fuzzer) spawnWorkersLoop(baseTestChain *chain.TestChain) error {
 	// Initialize workers array
-	f.workers = make([]*FuzzerWorker, f.config.Fuzzing.Workers)
+	f.workers = make([]*FuzzerWorker, f.numCPUWorkers)
 
 	// Create all workers upfront
-	for i := 0; i < f.config.Fuzzing.Workers; i++ {
+	for i := 0; i < f.numCPUWorkers; i++ {
 		// Create a new worker for this fuzzing
 		randomProvider := randomutils.ForkRandomProvider(f.randomProvider)
 		worker, err := newFuzzerWorker(f, i, randomProvider)
@@ -818,10 +821,12 @@ func (f *Fuzzer) spawnWorkersLoop(baseTestChain *chain.TestChain) error {
 // Returns a boolean indicating if workers should be cancelled and an error if one occurred
 func (f *Fuzzer) prepareWorkersDataInParallel(baseTestChain *chain.TestChain) (bool, error) {
 	var wg sync.WaitGroup
-	errChan := make(chan error, f.config.Fuzzing.Workers)
-	cancelChan := make(chan bool, f.config.Fuzzing.Workers)
+	errChan := make(chan error, f.numCPUWorkers)
+	cancelChan := make(chan bool, f.numCPUWorkers)
 
-	for i := 0; i < len(f.workers); i++ {
+	// Number of sequences to generate per CPU worker
+
+	for i := 0; i < f.numCPUWorkers; i++ {
 		wg.Add(1)
 		go func(workerIndex int) {
 			defer wg.Done()
@@ -937,14 +942,6 @@ func (f *Fuzzer) prepareWorkersDataInParallel(baseTestChain *chain.TestChain) (b
 			// Prepare execution data for GPU kernel
 			worker.originalValueSet = worker.valueSet.Clone()
 
-			// Initialize a new sequence within our sequence generator
-			isNewSequence, err := worker.sequenceGenerator.InitializeNextSequence()
-			if err != nil {
-				errChan <- err
-				return
-			}
-			worker.isNewSequence = isNewSequence
-
 			// Prepare a fresh list for shrink requests
 			worker.pendingShrinkRequests = make([]ShrinkCallSequenceRequest, 0)
 
@@ -990,42 +987,61 @@ func (f *Fuzzer) prepareWorkersDataInParallel(baseTestChain *chain.TestChain) (b
 				return len(worker.pendingShrinkRequests) > 0, nil
 			}
 
-			// NEW: Prepare the call sequence elements list for this worker
-			worker.callSequenceElements = make([]*calls.CallSequenceElement, 0)
-			// Track nonces for each sender address
-			nonceMap := make(map[common.Address]uint64)
+			// NEW: Prepare the call sequence elements list for this worker as a 2D array
+			// Each worker will now generate multiple sequences
+			worker.callSequenceElements = make([][]*calls.CallSequenceElement, f.sequencesPerCPUWorker)
 
-			// Populate the list with elements from the sequence generator
-			for i := 0; ; i++ {
-				element, err := worker.sequenceGenerator.PopSequenceElement()
+			// Generate multiple sequences per worker
+			for seqIdx := 0; seqIdx < f.sequencesPerCPUWorker; seqIdx++ {
+				// Initialize a new sequence within our sequence generator
+				isNewSequence, err := worker.sequenceGenerator.InitializeNextSequence()
 				if err != nil {
 					errChan <- err
 					return
 				}
-				if element == nil {
-					break
+
+				// Store if this is a new sequence (only for the first one as that's what current code uses)
+				if seqIdx == 0 {
+					worker.isNewSequence = isNewSequence
 				}
 
-				// Fix nonce if needed
-				if element.Call != nil {
-					sender := element.Call.From
-					currentNonce, exists := nonceMap[sender]
+				// Initialize a new sequence array
+				worker.callSequenceElements[seqIdx] = make([]*calls.CallSequenceElement, 0)
 
-					if exists && element.Call.Nonce <= currentNonce {
-						// Update nonce if it's not greater than the current nonce for this sender
-						element.Call.Nonce = currentNonce + 1
+				// Track nonces for each sender address within this sequence
+				nonceMap := make(map[common.Address]uint64)
+
+				// Populate this sequence with elements from the sequence generator
+				for {
+					element, err := worker.sequenceGenerator.PopSequenceElement()
+					if err != nil {
+						errChan <- err
+						return
+					}
+					if element == nil {
+						break
 					}
 
-					// Update the nonce map with the latest value
-					nonceMap[sender] = element.Call.Nonce
-				}
+					// Fix nonce if needed
+					if element.Call != nil {
+						sender := element.Call.From
+						currentNonce, exists := nonceMap[sender]
 
-				worker.callSequenceElements = append(worker.callSequenceElements, element)
+						if exists && element.Call.Nonce <= currentNonce {
+							// Update nonce if it's not greater than the current nonce for this sender
+							element.Call.Nonce = currentNonce + 1
+						}
+
+						// Update the nonce map with the latest value
+						nonceMap[sender] = element.Call.Nonce
+					}
+
+					worker.callSequenceElements[seqIdx] = append(worker.callSequenceElements[seqIdx], element)
+				}
 			}
-			// print the call sequence elements
-			// fmt.Println("callSequenceElements: ", worker.callSequenceElements)
-			// Emit event indicating the worker is about to test a new call sequence
-			err = worker.Events.CallSequenceTesting.Publish(FuzzerWorkerCallSequenceTestingEvent{
+
+			// Emit event indicating the worker is about to test new call sequences
+			err := worker.Events.CallSequenceTesting.Publish(FuzzerWorkerCallSequenceTestingEvent{
 				Worker: worker,
 			})
 			if err != nil {
@@ -1339,7 +1355,7 @@ func (f *Fuzzer) prepareAndProcessChainStateInGPU(testChain *chain.TestChain) er
 	cJSON := C.CString(stateJSON)
 	defer C.free(unsafe.Pointer(cJSON))
 
-	result := C.process_json_state_gpu(cJSON, C.uint(len(f.workers)))
+	result := C.process_json_state_gpu(cJSON, C.uint(f.config.Fuzzing.Workers))
 
 	// Check the result
 	if result != 0 {
@@ -1447,7 +1463,7 @@ func (f *Fuzzer) launchGPUKernel() error {
 	}
 
 	// Initialize a slice to hold the growing call sequences for each worker
-	allCallSequences := make([]calls.CallSequence, len(f.workers))
+	allCallSequences := make([]calls.CallSequence, f.config.Fuzzing.Workers)
 	for i := range allCallSequences {
 		allCallSequences[i] = make(calls.CallSequence, 0)
 	}
@@ -1459,8 +1475,10 @@ func (f *Fuzzer) launchGPUKernel() error {
 
 		for workerIdx := 0; workerIdx < len(f.workers); workerIdx++ {
 			worker := f.workers[workerIdx]
-			if worker != nil && elementIdx < len(worker.callSequenceElements) {
-				elementsToProcess = append(elementsToProcess, worker.callSequenceElements[elementIdx])
+			for sequenceIdx := 0; sequenceIdx < len(worker.callSequenceElements); sequenceIdx++ {
+				if worker != nil && elementIdx < len(worker.callSequenceElements[sequenceIdx]) {
+					elementsToProcess = append(elementsToProcess, worker.callSequenceElements[sequenceIdx][elementIdx])
+				}
 			}
 		}
 
@@ -1475,15 +1493,16 @@ func (f *Fuzzer) launchGPUKernel() error {
 
 				var workerWeights []*big.Int
 
-				for i, worker := range f.workers {
-					if worker != nil && elementIdx < len(worker.callSequenceElements) {
-						// Add the current element to this worker's growing sequence
-						allCallSequences[i] = append(allCallSequences[i], elementsToProcess[i])
-
-						workerWeights = append(workerWeights, worker.getNewCorpusCallSequenceWeight())
+				for _, worker := range f.workers {
+					newWorkerWeight := worker.getNewCorpusCallSequenceWeight()
+					// only call get once and duplicate for each sequence the worker processes
+					for idx := 0; idx < f.sequencesPerCPUWorker; idx++ {
+						workerWeights = append(workerWeights, newWorkerWeight)
 					}
 				}
-
+				for idx, elem := range elementsToProcess {
+					allCallSequences[idx] = append(allCallSequences[idx], elem)
+				}
 				// fmt.Println("Medusa: workerWeights: ", workerWeights, "length: ", len(workerWeights))
 
 				err = f.corpus.CheckGPUCoverageAndUpdate(
@@ -1541,8 +1560,8 @@ func (f *Fuzzer) launchGPUKernel() error {
 // Returns a boolean indicating if workers should be cancelled and an error if one occurred
 func (f *Fuzzer) processWorkersResultsInParallel() (bool, error) {
 	var wg sync.WaitGroup
-	errChan := make(chan error, f.config.Fuzzing.Workers)
-	cancelChan := make(chan bool, f.config.Fuzzing.Workers)
+	errChan := make(chan error, f.numCPUWorkers)
+	cancelChan := make(chan bool, f.numCPUWorkers)
 
 	for i := 0; i < len(f.workers); i++ {
 		wg.Add(1)
@@ -1605,12 +1624,12 @@ func (f *Fuzzer) processWorkersResultsInParallel() (bool, error) {
 			}
 
 			// Update metrics
-			worker.workerMetrics().sequencesTested.Add(worker.workerMetrics().sequencesTested, big.NewInt(1))
-			worker.workerMetrics().callsTested.Add(worker.workerMetrics().callsTested, big.NewInt(int64(len(worker.callSequenceElements))))
+			worker.workerMetrics().sequencesTested.Add(worker.workerMetrics().sequencesTested, big.NewInt(1*int64(f.sequencesPerCPUWorker)))
+			worker.workerMetrics().callsTested.Add(worker.workerMetrics().callsTested, big.NewInt(int64(f.sequencesPerCPUWorker*worker.fuzzer.config.Fuzzing.CallSequenceLength)))
 			// fmt.Println("CuEVM Debug: worker.workerMetrics().sequencesTested", worker.workerMetrics().sequencesTested)
 			// fmt.Println("CuEVM Debug: worker.workerMetrics().callsTested", worker.workerMetrics().callsTested)
 			// Check if we've reached the worker reset limit
-			sequencesTested := worker.workerMetrics().sequencesTested.Uint64()
+			sequencesTested := worker.workerMetrics().sequencesTested.Uint64() / uint64(f.sequencesPerCPUWorker) // div by sequences per cpu worker to check worker reset limit
 			if sequencesTested > uint64(worker.fuzzer.config.Fuzzing.WorkerResetLimit) {
 				// Close the chain to free resources
 				if worker.chain != nil {
@@ -1654,6 +1673,16 @@ func (f *Fuzzer) Start() error {
 	// CuEVM Debug: fixed random provider
 	f.randomProvider = rand.New(rand.NewSource(1))
 
+	// CuEVM Debug: fixed number of CPU workers
+	f.numCPUWorkers = runtime.NumCPU()
+
+	// Round up the total workers to be a multiple of numCPUWorkers
+	f.config.Fuzzing.Workers = ((f.config.Fuzzing.Workers + f.numCPUWorkers - 1) / f.numCPUWorkers) * f.numCPUWorkers
+
+	// Calculate how many sequences each CPU worker will process
+	f.sequencesPerCPUWorker = f.config.Fuzzing.Workers / f.numCPUWorkers
+	fmt.Println("CuEVM Debug: f.sequencesPerCPUWorker", f.sequencesPerCPUWorker, "f.config.Fuzzing.Workers", f.config.Fuzzing.Workers, "f.numCPUWorkers", f.numCPUWorkers)
+
 	// Create our main and emergency running context (allows us to cancel across threads)
 	f.ctx, f.ctxCancelFunc = context.WithCancel(context.Background())
 	f.emergencyCtx, f.emergencyCtxCancelFunc = context.WithCancel(context.Background())
@@ -1675,7 +1704,9 @@ func (f *Fuzzer) Start() error {
 	f.revertReporter.Start(f.ctx)
 
 	// Initialize our metrics and valueGenerator.
-	f.metrics = newFuzzerMetrics(f.config.Fuzzing.Workers, f.revertReporter.RevertMetricsCh)
+	// f.metrics = newFuzzerMetrics(f.config.Fuzzing.Workers, f.revertReporter.RevertMetricsCh)
+	// CuEVM : fixed number of workers
+	f.metrics = newFuzzerMetrics(f.numCPUWorkers, f.revertReporter.RevertMetricsCh)
 
 	// Initialize our test cases and providers
 	f.testCasesLock.Lock()
@@ -1728,7 +1759,7 @@ func (f *Fuzzer) Start() error {
 	}
 
 	// Log the start of our fuzzing campaign.
-	f.logger.Info("Fuzzing with ", colors.Bold, f.config.Fuzzing.Workers, colors.Reset, " workers")
+	f.logger.Info("Fuzzing with ", colors.Bold, f.config.Fuzzing.Workers, colors.Reset, " GPU workers, ", colors.Bold, f.numCPUWorkers, colors.Reset, " CPU workers, and ", colors.Bold, f.sequencesPerCPUWorker, colors.Reset, " sequences per CPU worker")
 
 	// Start our printing loop now that we're about to begin fuzzing.
 	go f.printMetricsLoop()
