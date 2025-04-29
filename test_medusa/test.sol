@@ -2,27 +2,42 @@ pragma solidity ^0.7.0;
 contract Test {
 
     // uint256 public counter = 2 ** 256/4;
-    uint256 public counter = 1;
-    uint256 public counter2 = 32;
-    uint256 public counter3 = 3;
-    function inc(uint256 val) public returns (uint256) {
-        // uint256 tmp = counter;
-        if (val % 2 == 0) {
-            counter += 1;
-        }
-
-        if (val % 8 == 1) {
-            counter2 *= 2;
-        }
-        // assert(tmp <= counter);
-        // assert(counter <3);
-        // return (counter - tmp);
+    uint256 public counter1 = 0;
+    uint256 public counter2 = 0;
+    uint256 public counter3 = 0;
+    function dummy1(uint256 val) public returns (uint256) {
     }
-    function bug() public {
-        assert (counter < 3);
+    function dummy2(uint256 val) public returns (uint256) {
+    }
+    function set1(uint input) public {
+        if (input % 5 == 3)
+        counter1 ++;
+    }
+    function set2() public {
+        counter2 ++;
+    }
+    function set3() public {
+        counter3 ++;
+    }
+    
+    function bug1() public {
+        assert (counter1 != 1);
+
+        counter1 = 0;
     }
 
     function bug2() public {
-        assert (counter2 <=123);
+        assert (counter1 != 1 || counter2 != 1);
+
+        counter1 = 0;
+        counter2 = 0;
+    }
+
+    function bug3() public {
+        assert (counter1 != 1 || counter2 != 1 || counter3 != 1);
+
+        counter1 = 0;
+        counter2 = 0;
+        counter3 = 0;
     }
 }

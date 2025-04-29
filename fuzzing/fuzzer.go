@@ -99,7 +99,7 @@ GPUExecutionResultC* process_batch_transactions(const unsigned char* fromAddr, c
                                int dataOffsetsLen, const uint32_t* dataSizes, int dataSizesLen, int txCount);
 
 // Updated function declaration with reset_state parameter
-int process_json_state_gpu(const char* json_state, uint32_t num_instances);
+int process_json_state_gpu(const char* json_state, uint32_t num_instances, bool reset_state);
 
 // Function to return results to Go
 // Function to get GPU execution results
@@ -183,6 +183,7 @@ type Fuzzer struct {
 	// CuEVM: CPU workers is fixed to number of threads x 2
 	numCPUWorkers         int
 	sequencesPerCPUWorker int
+	GPUchainInitiated     bool
 	// CuEVM debug: for directly calling in fuzzing loop
 	property_test_provider     *PropertyTestCaseProvider
 	assertion_test_provider    *AssertionTestCaseProvider
@@ -1281,6 +1282,14 @@ func (f *Fuzzer) runTransactionsGPU(callSequenceElements []*calls.CallSequenceEl
 
 // prepareAndProcessChainStateInGPU extracts the chain state and block header information and sends it to the GPU
 func (f *Fuzzer) prepareAndProcessChainStateInGPU(testChain *chain.TestChain) error {
+	if f.GPUchainInitiated {
+		fmt.Println("\n\n GPU chain already initiated, skipping JSON dump state\n\n")
+		result := C.process_json_state_gpu(nil, C.uint(f.config.Fuzzing.Workers), true)
+		if result != 0 {
+			return fmt.Errorf("C++ GPU state processing returned error code: %d", result)
+		}
+		return nil
+	}
 	fmt.Println("Go: Preparing and processing chain state data in GPU")
 	// Print all deployed contracts and their bytecode hashes
 	fmt.Println("===== DEPLOYED CONTRACTS AND THEIR BYTECODE HASHES =====")
@@ -1355,13 +1364,14 @@ func (f *Fuzzer) prepareAndProcessChainStateInGPU(testChain *chain.TestChain) er
 	cJSON := C.CString(stateJSON)
 	defer C.free(unsafe.Pointer(cJSON))
 
-	result := C.process_json_state_gpu(cJSON, C.uint(f.config.Fuzzing.Workers))
+	result := C.process_json_state_gpu(cJSON, C.uint(f.config.Fuzzing.Workers), false)
 
 	// Check the result
 	if result != 0 {
 		return fmt.Errorf("C++ GPU state processing returned error code: %d", result)
 	}
 
+	f.GPUchainInitiated = true
 	return nil
 }
 
@@ -1468,8 +1478,14 @@ func (f *Fuzzer) launchGPUKernel() error {
 		allCallSequences[i] = make(calls.CallSequence, 0)
 	}
 
+	// debug printing
+	// for i := 0; i < len(f.workers); i++ {
+	// 	for j := 0; j < len(f.workers[i].callSequenceElements); j++ {
+	// 		fmt.Println("f.workers[", i, "].callSequenceElements[", j, "]: ", f.workers[i].callSequenceElements[j])
+	// 	}
+	// }
 	// Process one element at a time from each worker
-	for elementIdx := 0; elementIdx < len(f.workers[0].callSequenceElements); elementIdx++ {
+	for elementIdx := 0; elementIdx < f.config.Fuzzing.CallSequenceLength; elementIdx++ {
 		// Collect one element from each worker that has an element at this index
 		elementsToProcess := make([]*calls.CallSequenceElement, 0)
 
@@ -1675,7 +1691,7 @@ func (f *Fuzzer) Start() error {
 
 	// CuEVM Debug: fixed number of CPU workers
 	f.numCPUWorkers = runtime.NumCPU()
-
+	f.GPUchainInitiated = false
 	// Round up the total workers to be a multiple of numCPUWorkers
 	f.config.Fuzzing.Workers = ((f.config.Fuzzing.Workers + f.numCPUWorkers - 1) / f.numCPUWorkers) * f.numCPUWorkers
 
