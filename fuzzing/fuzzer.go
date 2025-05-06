@@ -1263,12 +1263,18 @@ func (f *Fuzzer) runTransactionsGPU(callSequenceElements []*calls.CallSequenceEl
 	// Process success status
 	if cResult.error_codes != nil && cResult.num_return_data > 0 {
 		errorCodesSlice := unsafe.Slice(cResult.error_codes, int(cResult.num_return_data))
-		errorCodesStr := make([]string, int(cResult.num_return_data))
+		// errorCodesStr := make([]string, int(cResult.num_return_data))
+		// non_zero_error_code := 0
 		for i := 0; i < int(cResult.num_return_data); i++ {
 			result.ErrorCodes[i] = uint8(errorCodesSlice[i])
-			errorCodesStr[i] = fmt.Sprintf("%v", result.ErrorCodes[i])
+
+			// errorCodesStr[i] = fmt.Sprintf("%v", result.ErrorCodes[i])
+			// if result.ErrorCodes[i] != 0 {
+			// 	non_zero_error_code++
+			// }
 		}
-		fmt.Printf("Go: ErrorCodes = [%s]\n", strings.Join(errorCodesStr, ", "))
+		// fmt.Printf("Go: ErrorCodes = [%s]\n", strings.Join(errorCodesStr, ", "))
+		// fmt.Printf("Go: Non-zero error codes: %d\n", non_zero_error_code)
 	} else {
 		fmt.Println("Go: No success status data received from C.")
 		// Fill with default false if needed, though it should match num_return_data
