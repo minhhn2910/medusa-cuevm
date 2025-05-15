@@ -259,7 +259,32 @@ func (g *CallSequenceGenerator) PopSequenceElement() (*calls.CallSequenceElement
 			if err != nil {
 				return nil, err
 			}
+		} else {
+			// CUEVM modify
+			// If this is a payable function, generate value to send
+			var value *big.Int
+			value = big.NewInt(0)
+			selectedMethod := element.Call.DataAbiValues.Method
+			if selectedMethod.StateMutability == "payable" {
+				value = g.config.ValueGenerator.GenerateInteger(false, 64)
+			}
+			// Generate fuzzed parameters for the function call
+			args := make([]any, len(selectedMethod.Inputs))
+			for i := 0; i < len(args); i++ {
+				// Create our fuzzed parameters.
+				input := selectedMethod.Inputs[i]
+				args[i] = valuegeneration.GenerateAbiValue(g.config.ValueGenerator, &input.Type)
+			}
+			selectedContract := element.Contract
+			blockNumberDelay := element.BlockNumberDelay
+			blockTimestampDelay := element.BlockTimestampDelay
+			msg := calls.NewCallMessageWithAbiValueData(element.Call.From, element.Call.To, 0, value, g.worker.fuzzer.config.Fuzzing.TransactionGasLimit, nil, nil, nil, &calls.CallMessageDataAbiValues{
+				Method:      selectedMethod,
+				InputValues: args,
+			})
+			element = calls.NewCallSequenceElement(selectedContract, msg, blockNumberDelay, blockTimestampDelay)
 		}
+
 	}
 
 	// Update the element with the current nonce for the associated chain.

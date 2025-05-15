@@ -796,9 +796,6 @@ func (f *Fuzzer) spawnWorkersLoop(baseTestChain *chain.TestChain) error {
 		}
 
 		loopCounter++
-		// if loopCounter == 2 {
-		// 	working = false
-		// }
 		fmt.Printf("\n Medusa loop counter: %d\n", loopCounter)
 
 	}
@@ -991,19 +988,23 @@ func (f *Fuzzer) prepareWorkersDataInParallel(baseTestChain *chain.TestChain) (b
 			// NEW: Prepare the call sequence elements list for this worker as a 2D array
 			// Each worker will now generate multiple sequences
 			worker.callSequenceElements = make([][]*calls.CallSequenceElement, f.sequencesPerCPUWorker)
-
+			GPUWarpSize := 32
 			// Generate multiple sequences per worker
 			for seqIdx := 0; seqIdx < f.sequencesPerCPUWorker; seqIdx++ {
 				// Initialize a new sequence within our sequence generator
-				isNewSequence, err := worker.sequenceGenerator.InitializeNextSequence()
-				if err != nil {
-					errChan <- err
-					return
-				}
-
-				// Store if this is a new sequence (only for the first one as that's what current code uses)
-				if seqIdx == 0 {
-					worker.isNewSequence = isNewSequence
+				if seqIdx%GPUWarpSize == 0 {
+					isNewSequence, err := worker.sequenceGenerator.InitializeNextSequence()
+					if err != nil {
+						errChan <- err
+						return
+					}
+					// Store if this is a new sequence (only for the first one as that's what current code uses)
+					if seqIdx == 0 {
+						worker.isNewSequence = isNewSequence
+					}
+				} else {
+					// soft reset, the same sequence generator but different input values
+					worker.sequenceGenerator.fetchIndex = 0
 				}
 
 				// Initialize a new sequence array
@@ -1487,7 +1488,9 @@ func (f *Fuzzer) launchGPUKernel() error {
 	// debug printing
 	// for i := 0; i < len(f.workers); i++ {
 	// 	for j := 0; j < len(f.workers[i].callSequenceElements); j++ {
-	// 		fmt.Println("f.workers[", i, "].callSequenceElements[", j, "]: ", f.workers[i].callSequenceElements[j])
+	// 		for k := 0; k < len(f.workers[i].callSequenceElements[j]); k++ {
+	// 			fmt.Printf("f.workers[%d].callSequenceElements[%d][%d]: %s %s\n", i, j, k, f.workers[i].callSequenceElements[j][k].Call.DataAbiValues.Method, hex.EncodeToString(f.workers[i].callSequenceElements[j][k].Call.Data))
+	// 		}
 	// 	}
 	// }
 	// Process one element at a time from each worker
@@ -1696,7 +1699,7 @@ func (f *Fuzzer) Start() error {
 	f.randomProvider = rand.New(rand.NewSource(1))
 
 	// CuEVM Debug: fixed number of CPU workers
-	f.numCPUWorkers = runtime.NumCPU()
+	f.numCPUWorkers = 2 * runtime.NumCPU()
 	f.GPUchainInitiated = false
 	// Round up the total workers to be a multiple of numCPUWorkers
 	f.config.Fuzzing.Workers = ((f.config.Fuzzing.Workers + f.numCPUWorkers - 1) / f.numCPUWorkers) * f.numCPUWorkers
