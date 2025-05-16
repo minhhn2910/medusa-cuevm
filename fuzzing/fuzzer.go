@@ -988,11 +988,12 @@ func (f *Fuzzer) prepareWorkersDataInParallel(baseTestChain *chain.TestChain) (b
 			// NEW: Prepare the call sequence elements list for this worker as a 2D array
 			// Each worker will now generate multiple sequences
 			worker.callSequenceElements = make([][]*calls.CallSequenceElement, f.sequencesPerCPUWorker)
-			GPUWarpSize := 32
+			// Instead of generating new sequence, modify existing ones
+			SkipSequenceSize := 32
 			// Generate multiple sequences per worker
 			for seqIdx := 0; seqIdx < f.sequencesPerCPUWorker; seqIdx++ {
 				// Initialize a new sequence within our sequence generator
-				if seqIdx%GPUWarpSize == 0 {
+				if seqIdx%SkipSequenceSize == 0 {
 					isNewSequence, err := worker.sequenceGenerator.InitializeNextSequence()
 					if err != nil {
 						errChan <- err

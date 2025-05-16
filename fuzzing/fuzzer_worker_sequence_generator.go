@@ -265,16 +265,18 @@ func (g *CallSequenceGenerator) PopSequenceElement() (*calls.CallSequenceElement
 			var value *big.Int
 			value = big.NewInt(0)
 			selectedMethod := element.Call.DataAbiValues.Method
-			if selectedMethod.StateMutability == "payable" {
-				value = g.config.ValueGenerator.GenerateInteger(false, 64)
-			}
+			// if selectedMethod.StateMutability == "payable" {
+			// 	value = g.config.ValueGenerator.GenerateInteger(false, 64)
+			// }
 			// Generate fuzzed parameters for the function call
-			args := make([]any, len(selectedMethod.Inputs))
-			for i := 0; i < len(args); i++ {
-				// Create our fuzzed parameters.
-				input := selectedMethod.Inputs[i]
-				args[i] = valuegeneration.GenerateAbiValue(g.config.ValueGenerator, &input.Type)
-			}
+			// args := make([]any, len(selectedMethod.Inputs))
+			// for i := 0; i < len(args); i++ {
+			// 	// Create our fuzzed parameters.
+			// 	input := selectedMethod.Inputs[i]
+			// 	args[i] = valuegeneration.GenerateAbiValue(g.config.ValueGenerator, &input.Type)
+			// }
+			// CUEVM debug perf , disable value mutation
+			args := element.Call.DataAbiValues.InputValues
 			selectedContract := element.Contract
 			blockNumberDelay := element.BlockNumberDelay
 			blockTimestampDelay := element.BlockTimestampDelay
