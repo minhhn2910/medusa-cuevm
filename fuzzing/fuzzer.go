@@ -95,8 +95,8 @@ typedef struct {
 
 // Updated function declaration with reuse_state_data parameter
 GPUExecutionResultC* process_batch_transactions(const unsigned char* fromAddr, const unsigned char* toAddr, const unsigned char* values,
-                               const unsigned char* callData, int callDataLen, const uint32_t* dataOffsets,
-                               int dataOffsetsLen, const uint32_t* dataSizes, int dataSizesLen, int txCount);
+                               const unsigned char* callData, int callDataLen, const uint32_t* dataOffsets, const uint32_t* dataSizes,
+							   int txBatchCount, int sequenceLength);
 
 // Updated function declaration with reset_state parameter
 int process_json_state_gpu(const char* json_state, uint32_t num_instances, bool reset_state);
@@ -796,6 +796,9 @@ func (f *Fuzzer) spawnWorkersLoop(baseTestChain *chain.TestChain) error {
 		}
 
 		loopCounter++
+		// CuEVM Debug
+		working = false
+
 		fmt.Printf("\n Medusa loop counter: %d\n", loopCounter)
 
 	}
@@ -1075,106 +1078,155 @@ func (f *Fuzzer) prepareWorkersDataInParallel(baseTestChain *chain.TestChain) (b
 }
 
 // prepareAndProcessTransactionDataInGPU extracts transaction data from call sequence elements and sends it to the GPU
-func (f *Fuzzer) runTransactionsGPU(callSequenceElements []*calls.CallSequenceElement) (*coverage.GPUExecutionResult, error) {
+func (f *Fuzzer) runTransactionsGPU(workers []*FuzzerWorker) (*coverage.GPUExecutionResult, error) {
 	fmt.Println("\nGo: Preparing transaction data in batch for GPU processing worker\n")
-
-	// Count valid call elements first
-	validCallCount := 0
-	for _, element := range callSequenceElements {
-		if element.Call != nil {
-			validCallCount++
+	// debug printing all sequences with idx
+	for workerIdx, worker := range f.workers {
+		for sequenceIdx, sequence := range worker.callSequenceElements {
+			fmt.Println("CuEVM Debug: worker", workerIdx, "sequence", sequenceIdx)
+			for elementIdx, element := range sequence {
+				fmt.Println("CuEVM Debug: element", elementIdx, element.Call.DataAbiValues.Method, "data", hex.EncodeToString(element.Call.Data))
+			}
 		}
 	}
-
-	if validCallCount == 0 {
-		return nil, nil // Nothing to process
-	}
-
+	// Count valid call elements first
+	validCallCount := len(f.workers) * len(workers[0].callSequenceElements) * len(workers[0].callSequenceElements[0])
+	txBatchSize := len(f.workers) * len(workers[0].callSequenceElements)
+	sequenceLength := len(workers[0].callSequenceElements[0])
+	fmt.Println("CuEVM Debug: validCallCount", validCallCount, "txBatchSize", txBatchSize, "sequenceLength", sequenceLength)
 	// Use fixed from and to addresses (32 bytes each)
 	fromAddr := make([]byte, 32)
 	toAddr := make([]byte, 32)
 
-	// Use first valid call element for from/to addresses
-	for _, element := range callSequenceElements {
-		if element.Call != nil {
-			// Copy from address (right-padded to 32 bytes)
-			copy(fromAddr[12:], element.Call.From.Bytes()) // Ethereum addresses are 20 bytes
+	// Copy from address (right-padded to 32 bytes)
+	copy(fromAddr[12:], workers[0].callSequenceElements[0][0].Call.From.Bytes()) // Ethereum addresses are 20 bytes
 
-			// Copy to address (right-padded to 32 bytes)
-			if element.Call.To != nil {
-				copy(toAddr[12:], element.Call.To.Bytes())
-			}
-			break
-		}
-	}
+	// Copy to address (right-padded to 32 bytes)
+	copy(toAddr[12:], workers[0].callSequenceElements[0][0].Call.To.Bytes())
 
 	// Pre-allocate value array
 	values := make([]byte, validCallCount*32) // 32 bytes for each uint256
 
 	// For data we need two arrays - the data itself and offsets
 	// First pass to calculate total data size
-	totalDataSize := 0
-	for _, element := range callSequenceElements {
-		if element.Call != nil {
-			totalDataSize += len(element.Call.Data)
-		}
-	}
 
-	callData := make([]byte, totalDataSize)
+	var callData []byte // make([]byte, validCallCount*4)
 	dataOffsets := make([]uint32, validCallCount)
 	dataSizes := make([]uint32, validCallCount)
 
 	// Fill arrays from call elements
 	idx := 0
 	dataOffset := 0
-	for _, element := range callSequenceElements {
-		if element.Call == nil {
-			continue
+	for elementIdx := 0; elementIdx < f.config.Fuzzing.CallSequenceLength; elementIdx++ {
+		for workerIdx := 0; workerIdx < len(f.workers); workerIdx++ {
+			worker := f.workers[workerIdx]
+			for sequenceIdx := 0; sequenceIdx < len(worker.callSequenceElements); sequenceIdx++ {
+				call := worker.callSequenceElements[sequenceIdx][elementIdx].Call
+				if call == nil {
+					idx++
+					continue
+
+				}
+				valueBytes := call.Value.Bytes()
+				copy(values[idx*32+32-len(valueBytes):idx*32+32], valueBytes)
+				if len(call.Data) > 0 {
+					callData = append(callData, call.Data...)
+				}
+				dataOffsets[idx] = uint32(dataOffset)
+				dataSizes[idx] = uint32(len(call.Data))
+				dataOffset += len(call.Data)
+				idx++
+			}
+
+			if idx%txBatchSize == 0 {
+				// Reset data offset for each batch
+				dataOffset = 0
+			}
 		}
-
-		call := element.Call
-
-		// Copy value (big-endian)
-		valueBytes := call.Value.Bytes()
-		copy(values[idx*32+32-len(valueBytes):idx*32+32], valueBytes)
-
-		// Handle call data
-		if len(call.Data) > 0 {
-			copy(callData[dataOffset:], call.Data)
-			dataOffsets[idx] = uint32(dataOffset)
-			dataSizes[idx] = uint32(len(call.Data))
-			dataOffset += len(call.Data)
-		}
-
-		idx++
 	}
-
-	// Call C function with simplified arrays
+	fmt.Println("CuEVM Debug: callData length", len(callData))
+	fmt.Println("CuEVM Debug: dataOffsets length", len(dataOffsets))
+	fmt.Println("CuEVM Debug: dataSizes length", len(dataSizes))
+	fmt.Println("CuEVM Debug: values length", len(values))
+	fmt.Println("CuEVM Debug: validCallCount", validCallCount)
+	fmt.Print("CuEVM Debug: dataOffsets & dataSizes: ")
+	for i := 0; i < validCallCount; i++ {
+		fmt.Printf("[%d]:(%d,%d) ", i, dataOffsets[i], dataSizes[i])
+	}
+	fmt.Println() // Add a newline at the end
+	/// print all call data
+	if len(callData) > 0 {
+		fmt.Print("CuEVM Debug: callData: ")
+		for i, b := range callData {
+			if i > 0 && i%4 == 0 {
+				fmt.Print(" ")
+			}
+			fmt.Printf("%02x", b)
+		}
+		fmt.Println() // Add a newline at the end of the printed data
+	}
+	fmt.Println("CuEVM Debug: calling C function")
 	cResult := C.process_batch_transactions(
 		(*C.uchar)(unsafe.Pointer(&fromAddr[0])),
 		(*C.uchar)(unsafe.Pointer(&toAddr[0])),
 		(*C.uchar)(unsafe.Pointer(&values[0])),
 		(*C.uchar)(unsafe.Pointer(&callData[0])), C.int(len(callData)),
-		(*C.uint)(unsafe.Pointer(&dataOffsets[0])), C.int(len(dataOffsets)),
-		(*C.uint)(unsafe.Pointer(&dataSizes[0])), C.int(len(dataSizes)),
-		C.int(validCallCount),
+		(*C.uint)(unsafe.Pointer(&dataOffsets[0])),
+		(*C.uint)(unsafe.Pointer(&dataSizes[0])),
+		C.int(txBatchSize),
+		C.int(sequenceLength),
 	)
+	fmt.Println("CuEVM Debug: C function returned", cResult)
+	// for _, element := range callSequenceElements {
+	// 	if element.Call == nil {
+	// 		continue
+	// 	}
 
-	// Check if execution failed
-	if cResult == nil {
-		fmt.Println("GPU transaction processing failed")
-		return nil, fmt.Errorf("GPU transaction processing failed")
-	}
+	// 	call := element.Call
 
-	// Ensure we free the C result when we're done with it
-	defer C.free_gpu_execution_results(cResult)
+	// 	// Copy value (big-endian)
+	// 	valueBytes := call.Value.Bytes()
+	// 	copy(values[idx*32+32-len(valueBytes):idx*32+32], valueBytes)
 
-	// Parse the C result into a Go structure
-	result := &coverage.GPUExecutionResult{
-		ReturnData: make([][]byte, int(cResult.num_return_data)),
-		Coverage:   make([]coverage.GPUCoverage, int(cResult.num_coverage)),
-		ErrorCodes: make([]uint8, int(cResult.num_return_data)),
-	}
+	// 	// Handle call data
+	// 	if len(call.Data) > 0 {
+	// 		copy(callData[dataOffset:], call.Data)
+	// 		dataOffsets[idx] = uint32(dataOffset)
+	// 		dataSizes[idx] = uint32(len(call.Data))
+	// 		dataOffset += len(call.Data)
+	// 	}
+
+	// 	idx++
+	// }
+
+	/*
+		// Call C function with simplified arrays
+		cResult := C.process_batch_transactions(
+			(*C.uchar)(unsafe.Pointer(&fromAddr[0])),
+			(*C.uchar)(unsafe.Pointer(&toAddr[0])),
+			(*C.uchar)(unsafe.Pointer(&values[0])),
+			(*C.uchar)(unsafe.Pointer(&callData[0])), C.int(len(callData)),
+			(*C.uint)(unsafe.Pointer(&dataOffsets[0])), C.int(len(dataOffsets)),
+			(*C.uint)(unsafe.Pointer(&dataSizes[0])), C.int(len(dataSizes)),
+			C.int(validCallCount),
+		)
+
+		// Check if execution failed
+		if cResult == nil {
+			fmt.Println("GPU transaction processing failed")
+			return nil, fmt.Errorf("GPU transaction processing failed")
+		}
+
+		// Ensure we free the C result when we're done with it
+		defer C.free_gpu_execution_results(cResult)
+
+		// Parse the C result into a Go structure
+		result := &coverage.GPUExecutionResult{
+			ReturnData: make([][]byte, int(cResult.num_return_data)),
+			Coverage:   make([]coverage.GPUCoverage, int(cResult.num_coverage)),
+			ErrorCodes: make([]uint8, int(cResult.num_return_data)),
+		}
+	*/
 
 	// Process return data
 	// returnDataSlice := unsafe.Slice(cResult.return_data, int(cResult.num_return_data))
@@ -1188,104 +1240,37 @@ func (f *Fuzzer) runTransactionsGPU(callSequenceElements []*calls.CallSequenceEl
 	// 		result.ReturnData[i] = []byte{}
 	// 	}
 	// }
+	/*
+			// Process coverage data
+			coverageSlice := unsafe.Slice(cResult.coverage, int(cResult.num_coverage))
+			numCoverage := int(cResult.num_coverage)
 
-	// Process coverage data
-	coverageSlice := unsafe.Slice(cResult.coverage, int(cResult.num_coverage))
-	numCoverage := int(cResult.num_coverage)
+			// Process success status
+			if cResult.error_codes != nil && cResult.num_return_data > 0 {
+				errorCodesSlice := unsafe.Slice(cResult.error_codes, int(cResult.num_return_data))
+				// errorCodesStr := make([]string, int(cResult.num_return_data))
+				// non_zero_error_code := 0
+				for i := 0; i < int(cResult.num_return_data); i++ {
+					result.ErrorCodes[i] = uint8(errorCodesSlice[i])
 
-	// Pre-allocate the result array
-	result.Coverage = make([]coverage.GPUCoverage, numCoverage)
-
-	// Create a wait group to wait for all goroutines
-	var wg sync.WaitGroup
-
-	// Determine number of workers based on available CPU cores
-	numWorkers := runtime.NumCPU()
-	if numWorkers > numCoverage {
-		numWorkers = numCoverage
-	}
-
-	// Create a worker pool
-	workChan := make(chan int, numCoverage)
-
-	// Launch worker goroutines
-	for w := 0; w < numWorkers; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for i := range workChan {
-				cCov := coverageSlice[i]
-				coverage := coverage.GPUCoverage{
-					Addresses:       make([]string, int(cCov.num_addresses)),
-					BranchCoverages: make([][]uint64, int(cCov.num_addresses)),
+					// errorCodesStr[i] = fmt.Sprintf("%v", result.ErrorCodes[i])
+					// if result.ErrorCodes[i] != 0 {
+					// 	non_zero_error_code++
+					// }
 				}
-
-				// Process addresses
-				addressesSlice := unsafe.Slice(cCov.addresses, int(cCov.num_addresses))
-				for j := 0; j < int(cCov.num_addresses); j++ {
-					coverage.Addresses[j] = C.GoString(addressesSlice[j])
-
-					// Process branch coverage for this address
-					if j < int(cCov.num_addresses) {
-						branchCovSlice := unsafe.Slice(cCov.branch_coverage, int(cCov.num_addresses))
-						branchCovLengthsSlice := unsafe.Slice(cCov.branch_coverage_lengths, int(cCov.num_addresses))
-
-						if branchCovSlice[j] != nil {
-							length := branchCovLengthsSlice[j]
-							// Directly create a slice of uint64 markers
-							markers := make([]uint64, int(length))
-
-							// Copy the 64-bit markers directly
-							cMarkers := unsafe.Slice((*uint64)(unsafe.Pointer(branchCovSlice[j])), int(length))
-							for k := 0; k < int(length); k++ {
-								if cMarkers[k] != 0 { // Only include non-zero markers
-									markers[k] = uint64(cMarkers[k])
-								}
-							}
-							coverage.BranchCoverages[j] = markers
-						}
-					}
+				// fmt.Printf("Go: ErrorCodes = [%s]\n", strings.Join(errorCodesStr, ", "))
+				// fmt.Printf("Go: Non-zero error codes: %d\n", non_zero_error_code)
+			} else {
+				fmt.Println("Go: No success status data received from C.")
+				// Fill with default false if needed, though it should match num_return_data
+				for i := 0; i < len(result.ErrorCodes); i++ {
+					result.ErrorCodes[i] = 0
 				}
-
-				// Thread-safe assignment to result
-				result.Coverage[i] = coverage
 			}
-		}()
-	}
 
-	// Send work to the workers
-	for i := 0; i < numCoverage; i++ {
-		workChan <- i
-	}
-	close(workChan)
-
-	// Wait for all workers to finish
-	wg.Wait()
-
-	// Process success status
-	if cResult.error_codes != nil && cResult.num_return_data > 0 {
-		errorCodesSlice := unsafe.Slice(cResult.error_codes, int(cResult.num_return_data))
-		// errorCodesStr := make([]string, int(cResult.num_return_data))
-		// non_zero_error_code := 0
-		for i := 0; i < int(cResult.num_return_data); i++ {
-			result.ErrorCodes[i] = uint8(errorCodesSlice[i])
-
-			// errorCodesStr[i] = fmt.Sprintf("%v", result.ErrorCodes[i])
-			// if result.ErrorCodes[i] != 0 {
-			// 	non_zero_error_code++
-			// }
-		}
-		// fmt.Printf("Go: ErrorCodes = [%s]\n", strings.Join(errorCodesStr, ", "))
-		// fmt.Printf("Go: Non-zero error codes: %d\n", non_zero_error_code)
-	} else {
-		fmt.Println("Go: No success status data received from C.")
-		// Fill with default false if needed, though it should match num_return_data
-		for i := 0; i < len(result.ErrorCodes); i++ {
-			result.ErrorCodes[i] = 0
-		}
-	}
-
-	return result, nil
+		return result, nil
+	*/
+	return nil, nil
 }
 
 // prepareAndProcessChainStateInGPU extracts the chain state and block header information and sends it to the GPU
@@ -1481,10 +1466,10 @@ func (f *Fuzzer) launchGPUKernel() error {
 	}
 
 	// Initialize a slice to hold the growing call sequences for each worker
-	allCallSequences := make([]calls.CallSequence, f.config.Fuzzing.Workers)
-	for i := range allCallSequences {
-		allCallSequences[i] = make(calls.CallSequence, 0)
-	}
+	// allCallSequences := make([]calls.CallSequence, f.config.Fuzzing.Workers)
+	// for i := range allCallSequences {
+	// 	allCallSequences[i] = make(calls.CallSequence, 0)
+	// }
 
 	// debug printing
 	// for i := 0; i < len(f.workers); i++ {
@@ -1495,70 +1480,75 @@ func (f *Fuzzer) launchGPUKernel() error {
 	// 	}
 	// }
 	// Process one element at a time from each worker
-	for elementIdx := 0; elementIdx < f.config.Fuzzing.CallSequenceLength; elementIdx++ {
-		// Collect one element from each worker that has an element at this index
-		elementsToProcess := make([]*calls.CallSequenceElement, 0)
 
-		for workerIdx := 0; workerIdx < len(f.workers); workerIdx++ {
-			worker := f.workers[workerIdx]
-			for sequenceIdx := 0; sequenceIdx < len(worker.callSequenceElements); sequenceIdx++ {
-				if worker != nil && elementIdx < len(worker.callSequenceElements[sequenceIdx]) {
-					elementsToProcess = append(elementsToProcess, worker.callSequenceElements[sequenceIdx][elementIdx])
-				}
-			}
-		}
+	/*
+		for elementIdx := 0; elementIdx < f.config.Fuzzing.CallSequenceLength; elementIdx++ {
+			// Collect one element from each worker that has an element at this index
+			elementsToProcess := make([]*calls.CallSequenceElement, 0)
 
-		// If we collected any elements, process them
-		if len(elementsToProcess) > 0 {
-
-			gpuResults, err := f.runTransactionsGPU(elementsToProcess)
-			if err != nil {
-				f.logger.Warn("Failed to get GPU execution results", err)
-			} else if gpuResults != nil {
-				// Build the call sequences incrementally and collect weights
-
-				var workerWeights []*big.Int
-
-				for _, worker := range f.workers {
-					newWorkerWeight := worker.getNewCorpusCallSequenceWeight()
-					// only call get once and duplicate for each sequence the worker processes
-					for idx := 0; idx < f.sequencesPerCPUWorker; idx++ {
-						workerWeights = append(workerWeights, newWorkerWeight)
+			for workerIdx := 0; workerIdx < len(f.workers); workerIdx++ {
+				worker := f.workers[workerIdx]
+				for sequenceIdx := 0; sequenceIdx < len(worker.callSequenceElements); sequenceIdx++ {
+					if worker != nil && elementIdx < len(worker.callSequenceElements[sequenceIdx]) {
+						elementsToProcess = append(elementsToProcess, worker.callSequenceElements[sequenceIdx][elementIdx])
 					}
 				}
-				for idx, elem := range elementsToProcess {
-					allCallSequences[idx] = append(allCallSequences[idx], elem)
-				}
-				// fmt.Println("Medusa: workerWeights: ", workerWeights, "length: ", len(workerWeights))
+			}
 
-				err = f.corpus.CheckGPUCoverageAndUpdate(
-					gpuResults,
-					f.contractAddressToCodeHash,
-					allCallSequences,
-					workerWeights,
-					true)
+			// If we collected any elements, process them
+			if len(elementsToProcess) > 0 {
 
-				if err != nil || f.assertion_test_provider == nil {
-					fmt.Println("CuEVM Debug: assertion_test_provider is nil or error in CheckGPUCoverageAndUpdate")
-					return err
-				}
-
-				to_break, err := f.assertion_test_provider.GPUPostCallTest(f.workers, allCallSequences, gpuResults)
+				gpuResults, err := f.runTransactionsGPU(elementsToProcess)
 				if err != nil {
-					return err
+					f.logger.Warn("Failed to get GPU execution results", err)
+				} else if gpuResults != nil {
+					// Build the call sequences incrementally and collect weights
+
+					var workerWeights []*big.Int
+
+					for _, worker := range f.workers {
+						newWorkerWeight := worker.getNewCorpusCallSequenceWeight()
+						// only call get once and duplicate for each sequence the worker processes
+						for idx := 0; idx < f.sequencesPerCPUWorker; idx++ {
+							workerWeights = append(workerWeights, newWorkerWeight)
+						}
+					}
+					for idx, elem := range elementsToProcess {
+						allCallSequences[idx] = append(allCallSequences[idx], elem)
+					}
+					// fmt.Println("Medusa: workerWeights: ", workerWeights, "length: ", len(workerWeights))
+
+					err = f.corpus.CheckGPUCoverageAndUpdate(
+						gpuResults,
+						f.contractAddressToCodeHash,
+						allCallSequences,
+						workerWeights,
+						true)
+
+					if err != nil || f.assertion_test_provider == nil {
+						fmt.Println("CuEVM Debug: assertion_test_provider is nil or error in CheckGPUCoverageAndUpdate")
+						return err
+					}
+
+					to_break, err := f.assertion_test_provider.GPUPostCallTest(f.workers, allCallSequences, gpuResults)
+					if err != nil {
+						return err
+					}
+					// fmt.Println("CuEVM Debug: to_break", to_break)
+					// If our fuzzer context or the emergency context is cancelled, exit out immediately without results.
+					if utils.CheckContextDone(f.ctx) || to_break {
+						fmt.Println("\n\nCuEVM Debug: context done or to_break\n\n")
+						return nil
+					}
 				}
-				// fmt.Println("CuEVM Debug: to_break", to_break)
-				// If our fuzzer context or the emergency context is cancelled, exit out immediately without results.
-				if utils.CheckContextDone(f.ctx) || to_break {
-					fmt.Println("\n\nCuEVM Debug: context done or to_break\n\n")
-					return nil
-				}
+
 			}
 
 		}
-
-	}
-
+	*/
+	// CuEVM May version, send back the idx in all sequence elements for seed update.
+	gpuResults, err := f.runTransactionsGPU(f.workers)
+	fmt.Println("CuEVM Debug: gpuResults", gpuResults, "err", err)
 	// Now process transaction data for each worker
 	// for i := 0; i < len(f.workers); i++ {
 	// 	worker := f.workers[i]
@@ -1700,7 +1690,7 @@ func (f *Fuzzer) Start() error {
 	f.randomProvider = rand.New(rand.NewSource(1))
 
 	// CuEVM Debug: fixed number of CPU workers
-	f.numCPUWorkers = 2 * runtime.NumCPU()
+	f.numCPUWorkers = 2 // 2 * runtime.NumCPU()
 	f.GPUchainInitiated = false
 	// Round up the total workers to be a multiple of numCPUWorkers
 	f.config.Fuzzing.Workers = ((f.config.Fuzzing.Workers + f.numCPUWorkers - 1) / f.numCPUWorkers) * f.numCPUWorkers
