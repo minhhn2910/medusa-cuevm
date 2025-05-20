@@ -1,14 +1,53 @@
 package coverage
 
 import (
+	"fmt"
+	"strings"
+
 	"github.com/crytic/medusa-geth/common"
 )
 
-// GPUExecutionResult represents the coverage and return data from GPU execution
+// GPUExecutionResult represents essential execution data from the GPU
 type GPUExecutionResult struct {
-	ReturnData [][]byte      `json:"returnData"`
-	Coverage   []GPUCoverage `json:"coverage"`
-	ErrorCodes []uint8       `json:"errorCodes"`
+	// Coverage information
+	NewCoverageIndices [][]uint32
+
+	// Bug information
+	NewBugIndices [][]uint32
+	NewBugPCs     [][]uint32
+}
+
+// DebugString returns a debug string representation of the result
+func (r *GPUExecutionResult) DebugString() string {
+	if r == nil {
+		return "GPUExecutionResult: nil"
+	}
+
+	var output strings.Builder
+	output.WriteString(fmt.Sprintf("GPUExecutionResult: %d batches\n", len(r.NewCoverageIndices)))
+
+	for i := 0; i < len(r.NewCoverageIndices); i++ {
+		output.WriteString(fmt.Sprintf("\nBatch %d:\n", i))
+		output.WriteString(fmt.Sprintf("  New coverage entries: %d\n", len(r.NewCoverageIndices[i])))
+		if len(r.NewCoverageIndices[i]) > 0 {
+			output.WriteString(fmt.Sprintf("  Coverage indices: %v\n", r.NewCoverageIndices[i]))
+		}
+
+		numBugs := 0
+		if i < len(r.NewBugIndices) {
+			numBugs = len(r.NewBugIndices[i])
+		}
+
+		output.WriteString(fmt.Sprintf("  New bugs found: %d\n", numBugs))
+		if numBugs > 0 {
+			output.WriteString(fmt.Sprintf("  Bug indices: %v\n", r.NewBugIndices[i]))
+			if i < len(r.NewBugPCs) {
+				output.WriteString(fmt.Sprintf("  Bug PCs: %v\n", r.NewBugPCs[i]))
+			}
+		}
+	}
+
+	return output.String()
 }
 
 // GPUCoverage represents coverage data for a single GPU instance

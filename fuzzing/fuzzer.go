@@ -93,8 +93,21 @@ typedef struct {
     uint8_t* error_codes;
 } GPUExecutionResultC;
 
+typedef struct {
+    uint32_t* new_coverage_idx;
+    uint32_t num_new_coverage;
+    uint32_t* new_bug_idx;
+    uint32_t* new_bug_pc;
+    uint32_t num_new_bugs;
+} SimplifiedGPUResultSingleBatchC;
+
+typedef struct {
+    SimplifiedGPUResultSingleBatchC* results;
+    uint32_t num_results;
+} SimplifiedGPUResultC;
+
 // Updated function declaration with reuse_state_data parameter
-GPUExecutionResultC* process_batch_transactions(const unsigned char* fromAddr, const unsigned char* toAddr, const unsigned char* values,
+SimplifiedGPUResultC* process_batch_transactions(const unsigned char* fromAddr, const unsigned char* toAddr, const unsigned char* values,
                                const unsigned char* callData, int callDataLen, const uint32_t* dataOffsets, const uint32_t* dataSizes,
 							   int txBatchCount, int sequenceLength);
 
@@ -105,8 +118,13 @@ int process_json_state_gpu(const char* json_state, uint32_t num_instances, bool 
 // Function to get GPU execution results
 GPUExecutionResultC* get_gpu_execution_results();
 
+void get_gpu_execution_results_optimized(SimplifiedGPUResultC* result);
+
 // Function to free GPU execution results
 void free_gpu_execution_results(GPUExecutionResultC* result);
+
+// Function to free SimplifiedGPUResultC
+void free_simplified_gpu_result(SimplifiedGPUResultC* result);
 */
 import "C"
 
@@ -1176,100 +1194,63 @@ func (f *Fuzzer) runTransactionsGPU(workers []*FuzzerWorker) (*coverage.GPUExecu
 		C.int(txBatchSize),
 		C.int(sequenceLength),
 	)
+
 	fmt.Println("CuEVM Debug: C function returned", cResult)
-	// for _, element := range callSequenceElements {
-	// 	if element.Call == nil {
-	// 		continue
-	// 	}
 
-	// 	call := element.Call
+	if cResult != nil {
+		numResults := int(cResult.num_results)
 
-	// 	// Copy value (big-endian)
-	// 	valueBytes := call.Value.Bytes()
-	// 	copy(values[idx*32+32-len(valueBytes):idx*32+32], valueBytes)
-
-	// 	// Handle call data
-	// 	if len(call.Data) > 0 {
-	// 		copy(callData[dataOffset:], call.Data)
-	// 		dataOffsets[idx] = uint32(dataOffset)
-	// 		dataSizes[idx] = uint32(len(call.Data))
-	// 		dataOffset += len(call.Data)
-	// 	}
-
-	// 	idx++
-	// }
-
-	/*
-		// Call C function with simplified arrays
-		cResult := C.process_batch_transactions(
-			(*C.uchar)(unsafe.Pointer(&fromAddr[0])),
-			(*C.uchar)(unsafe.Pointer(&toAddr[0])),
-			(*C.uchar)(unsafe.Pointer(&values[0])),
-			(*C.uchar)(unsafe.Pointer(&callData[0])), C.int(len(callData)),
-			(*C.uint)(unsafe.Pointer(&dataOffsets[0])), C.int(len(dataOffsets)),
-			(*C.uint)(unsafe.Pointer(&dataSizes[0])), C.int(len(dataSizes)),
-			C.int(validCallCount),
-		)
-
-		// Check if execution failed
-		if cResult == nil {
-			fmt.Println("GPU transaction processing failed")
-			return nil, fmt.Errorf("GPU transaction processing failed")
-		}
-
-		// Ensure we free the C result when we're done with it
-		defer C.free_gpu_execution_results(cResult)
-
-		// Parse the C result into a Go structure
-		result := &coverage.GPUExecutionResult{
-			ReturnData: make([][]byte, int(cResult.num_return_data)),
-			Coverage:   make([]coverage.GPUCoverage, int(cResult.num_coverage)),
-			ErrorCodes: make([]uint8, int(cResult.num_return_data)),
-		}
-	*/
-
-	// Process return data
-	// returnDataSlice := unsafe.Slice(cResult.return_data, int(cResult.num_return_data))
-	// for i := 0; i < int(cResult.num_return_data); i++ {
-	// 	cData := returnDataSlice[i]
-	// 	if cData.data != nil && cData.length > 0 {
-	// 		// Create a Go slice that directly references the C data
-	// 		dataSlice := C.GoBytes(unsafe.Pointer(cData.data), C.int(cData.length))
-	// 		result.ReturnData[i] = dataSlice
-	// 	} else {
-	// 		result.ReturnData[i] = []byte{}
-	// 	}
-	// }
-	/*
-			// Process coverage data
-			coverageSlice := unsafe.Slice(cResult.coverage, int(cResult.num_coverage))
-			numCoverage := int(cResult.num_coverage)
-
-			// Process success status
-			if cResult.error_codes != nil && cResult.num_return_data > 0 {
-				errorCodesSlice := unsafe.Slice(cResult.error_codes, int(cResult.num_return_data))
-				// errorCodesStr := make([]string, int(cResult.num_return_data))
-				// non_zero_error_code := 0
-				for i := 0; i < int(cResult.num_return_data); i++ {
-					result.ErrorCodes[i] = uint8(errorCodesSlice[i])
-
-					// errorCodesStr[i] = fmt.Sprintf("%v", result.ErrorCodes[i])
-					// if result.ErrorCodes[i] != 0 {
-					// 	non_zero_error_code++
-					// }
-				}
-				// fmt.Printf("Go: ErrorCodes = [%s]\n", strings.Join(errorCodesStr, ", "))
-				// fmt.Printf("Go: Non-zero error codes: %d\n", non_zero_error_code)
-			} else {
-				fmt.Println("Go: No success status data received from C.")
-				// Fill with default false if needed, though it should match num_return_data
-				for i := 0; i < len(result.ErrorCodes); i++ {
-					result.ErrorCodes[i] = 0
-				}
+		// Only create the Go structure if we have results to return
+		if numResults > 0 {
+			gpuResult := &coverage.GPUExecutionResult{
+				NewCoverageIndices: make([][]uint32, numResults),
+				NewBugIndices:      make([][]uint32, numResults),
+				NewBugPCs:          make([][]uint32, numResults),
 			}
 
-		return result, nil
-	*/
+			// Process each batch result directly
+			results := unsafe.Slice(cResult.results, numResults)
+			for i := 0; i < numResults; i++ {
+				result := results[i]
+
+				// Process coverage data
+				numNewCoverage := int(result.num_new_coverage)
+				if numNewCoverage > 0 && result.new_coverage_idx != nil {
+					coverageIndices := unsafe.Slice((*uint32)(result.new_coverage_idx), numNewCoverage)
+					gpuResult.NewCoverageIndices[i] = make([]uint32, numNewCoverage)
+					copy(gpuResult.NewCoverageIndices[i], coverageIndices)
+				}
+
+				// Process bug data
+				numNewBugs := int(result.num_new_bugs)
+				if numNewBugs > 0 {
+					if result.new_bug_idx != nil {
+						bugIndices := unsafe.Slice((*uint32)(result.new_bug_idx), numNewBugs)
+						gpuResult.NewBugIndices[i] = make([]uint32, numNewBugs)
+						copy(gpuResult.NewBugIndices[i], bugIndices)
+					}
+
+					if result.new_bug_pc != nil {
+						bugPCs := unsafe.Slice((*uint32)(result.new_bug_pc), numNewBugs)
+						gpuResult.NewBugPCs[i] = make([]uint32, numNewBugs)
+						copy(gpuResult.NewBugPCs[i], bugPCs)
+					}
+				}
+			}
+			// Print debug information at the end
+			fmt.Println(gpuResult.DebugString())
+
+			// Free the C memory
+			C.free_simplified_gpu_result(cResult)
+			return gpuResult, nil
+		}
+
+		// Free the C memory
+		C.free_simplified_gpu_result(cResult)
+		fmt.Println("CuEVM Debug: GPU execution returned no results")
+	} else {
+		fmt.Println("CuEVM Debug: C function returned nil result")
+	}
 	return nil, nil
 }
 

@@ -570,26 +570,24 @@ func (c *Corpus) CheckGPUCoverageAndUpdate(
 	// fmt.Println("Medusa: coveragemaps before gpu update")
 	// fmt.Println(c.coverageMaps.DebugString())
 	// Process each GPU instance's coverage with its success flag
-	for i, instanceCoverage := range gpuResults.Coverage {
+	// for i, instanceCoverage := range gpuResults.Coverage {
 
-		// Update coverage for this instance
-		instanceUpdated, err := c.coverageMaps.UpdateCoverageFromGPU(codeHashMap, instanceCoverage)
-		if err != nil {
-			return err
-		}
-		// fmt.Println("Medusa: coveragemaps after gpu update")
-		// fmt.Println(c.coverageMaps.DebugString())
+	// 	// Update coverage for this instance
+	// 	instanceUpdated, err := c.coverageMaps.UpdateCoverageFromGPU(codeHashMap, instanceCoverage)
+	// 	if err != nil {
+	// 		return err
+	// 	}
 
-		// Track if any instance updated coverage
-		// coverageUpdated = coverageUpdated || instanceUpdated
-		if instanceUpdated {
-			// Save this sequence for mutation purposes
-			err := c.addCallSequence(c.callSequenceFiles, callSequences[i], true, mutationChooserWeights[i], flushImmediately)
-			if err != nil {
-				return err
-			}
-		}
-	}
+	// 	// Track if any instance updated coverage
+	// 	// coverageUpdated = coverageUpdated || instanceUpdated
+	// 	if instanceUpdated {
+	// 		// Save this sequence for mutation purposes
+	// 		err := c.addCallSequence(c.callSequenceFiles, callSequences[i], true, mutationChooserWeights[i], flushImmediately)
+	// 		if err != nil {
+	// 			return err
+	// 		}
+	// 	}
+	// }
 
 	// If we had an increase in coverage, we save the sequence
 
