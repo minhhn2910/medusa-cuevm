@@ -456,10 +456,6 @@ func SimulateExecuteCallSequenceGPUWithList(
 			}
 		}
 
-		fmt.Println("\nSimulateExecuteCallSequenceGPUWithList after executionCheckFunc\n")
-		// CuEVM debug, stop here
-		// break
-
 	}
 
 	// Commit the last pending block.

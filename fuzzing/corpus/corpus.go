@@ -453,7 +453,7 @@ func (c *Corpus) AddTestResultCallSequence(callSequence calls.CallSequence, muta
 // and the Corpus coverage maps are updated accordingly.
 // Returns an error if one occurs.
 func (c *Corpus) CheckSequenceCoverageAndUpdate(callSequence calls.CallSequence, mutationChooserWeight *big.Int, flushImmediately bool) error {
-	fmt.Println("\nMedusa: CheckSequenceCoverageAndUpdate\n")
+	// fmt.Println("\nMedusa: CheckSequenceCoverageAndUpdate\n")
 	// If we have coverage-guided fuzzing disabled or no calls in our sequence, there is nothing to do.
 	if len(callSequence) == 0 {
 		return nil
@@ -465,15 +465,15 @@ func (c *Corpus) CheckSequenceCoverageAndUpdate(callSequence calls.CallSequence,
 	lastMessageResult := lastCallChainReference.Block.MessageResults[lastCallChainReference.TransactionIndex]
 
 	lastMessageCoverageMaps := coverage.GetCoverageTracerResults(lastMessageResult)
-	fmt.Println("\nMedusa: lastMessageCoverageMaps\n")
-	fmt.Println(lastMessageCoverageMaps.DebugString())
+	// fmt.Println("\nMedusa: lastMessageCoverageMaps\n")
+	// fmt.Println(lastMessageCoverageMaps.DebugString())
 	// If we have none, because a coverage tracer wasn't attached when processing this call, we can stop.
 	if lastMessageCoverageMaps == nil {
 		return nil
 	}
 
 	// Memory optimization: Remove them from the results now that we obtained them, to free memory later.
-	coverage.RemoveCoverageTracerResults(lastMessageResult)
+	// coverage.RemoveCoverageTracerResults(lastMessageResult)
 	// fmt.Println("Medusa: coverage before update")
 	// fmt.Println(c.coverageMaps.DebugString())
 	// Merge the coverage maps into our total coverage maps and check if we had an update.
@@ -485,7 +485,7 @@ func (c *Corpus) CheckSequenceCoverageAndUpdate(callSequence calls.CallSequence,
 	// fmt.Println(c.coverageMaps.DebugString())
 	// If we had an increase in coverage, we save the sequence.
 	if coverageUpdated {
-		fmt.Println("\nMedusa: coverage updated\n")
+		// fmt.Println("\nMedusa: coverage updated\n")
 		// If we achieved new coverage, save this sequence for mutation purposes.
 		err = c.addCallSequence(c.callSequenceFiles, callSequence, true, mutationChooserWeight, flushImmediately)
 		if err != nil {
@@ -493,6 +493,21 @@ func (c *Corpus) CheckSequenceCoverageAndUpdate(callSequence calls.CallSequence,
 		}
 	}
 	return nil
+}
+
+// CuEVM: expose this function to be called in fuzzer.go
+func (c *Corpus) AddCallSequence(callSequence calls.CallSequence, mutationChooserWeight *big.Int) error {
+	return c.addCallSequence(c.callSequenceFiles, callSequence, true, mutationChooserWeight, true)
+}
+
+// CuEVM: expose this function to be called in fuzzer.go
+func (c *Corpus) ExtractAllSequences() []calls.CallSequence {
+
+	callSequencesToTest := make([]calls.CallSequence, 0)
+	for _, file := range c.callSequenceFiles.files {
+		callSequencesToTest = append(callSequencesToTest, file.data)
+	}
+	return callSequencesToTest
 }
 
 // UnexecutedCallSequence returns a call sequence loaded from disk which has not yet been returned by this method.
@@ -556,12 +571,11 @@ func (c *Corpus) Flush() error {
 func (c *Corpus) CheckGPUCoverageAndUpdate(
 	gpuResults *coverage.GPUExecutionResult,
 	codeHashMap map[common.Address]common.Hash,
-	callSequences []calls.CallSequence,
 	mutationChooserWeights []*big.Int,
 	flushImmediately bool) error {
 	fmt.Println("\nGo: Checking GPU coverage and updating corpus\n")
 	// If we have coverage-guided fuzzing disabled or no calls in our sequence, there is nothing to do.
-	if len(callSequences) == 0 || gpuResults == nil {
+	if gpuResults == nil {
 		return nil
 	}
 
