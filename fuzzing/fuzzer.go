@@ -1333,7 +1333,9 @@ func (f *Fuzzer) prepareAndProcessChainStateInGPU(testChain *chain.TestChain) er
 
 	// Convert state dump to JSON format
 	stateJSON := convertStateToJSON(&stateDump, testChain.Head().Header)
-
+	// CuEVM debug, to be deleted
+	// fmt.Println("CuEVM Debug: stateJSON", stateJSON)
+	// os.Exit(0)
 	// Call C function to process the JSON state
 	cJSON := C.CString(stateJSON)
 	defer C.free(unsafe.Pointer(cJSON))
@@ -1438,6 +1440,34 @@ func convertStateToJSON(stateDump *ethstate.Dump, blockHeader *types.Header) str
 func (f *Fuzzer) launchGPUKernel(loopCounter int) error {
 	f.logger.Info("Launching GPU kernel to execute call sequences with prepared element lists")
 
+	// CuEVM debug, to be deleted
+	// Extract transaction data from first element of each sequence
+	// var txDataList []string
+	// for i := 0; i < len(f.workers); i++ {
+	// 	for j := 0; j < len(f.workers[i].callSequenceElements); j++ {
+	// 		// Get the first element of the sequence (index 0)
+	// 		if len(f.workers[i].callSequenceElements[j]) > 0 {
+	// 			firstElement := f.workers[i].callSequenceElements[j][0]
+	// 			if firstElement != nil && firstElement.Call != nil && len(firstElement.Call.Data) > 0 {
+	// 				// Convert data to hex string with 0x prefix
+	// 				hexData := fmt.Sprintf("\"0x%x\"", firstElement.Call.Data)
+	// 				txDataList = append(txDataList, hexData)
+	// 			}
+	// 		}
+	// 	}
+	// }
+
+	// // Print all transaction data in the requested format
+	// if len(txDataList) > 0 {
+	// 	fmt.Println(strings.Join(txDataList, ","))
+	// }
+
+	// for i := 0; i < len(f.workers); i++ {
+	// 	for j := 0; j < len(f.workers[i].callSequenceElements); j++ {
+	// 		fmt.Println("f.workers[", i, "].callSequenceElements[", j, "]: ", f.workers[i].callSequenceElements[j])
+
+	// 	}
+	// }
 	// Process state data from our base test chain for GPU processing
 	if len(f.workers) > 0 && f.workers[0] != nil && f.workers[0].chain != nil {
 		err := f.prepareAndProcessChainStateInGPU(f.workers[0].chain)
@@ -1578,10 +1608,11 @@ func (f *Fuzzer) processWorkersResultsInParallel() (bool, error) {
 			sequencesTested := worker.workerMetrics().sequencesTested.Uint64() / uint64(f.sequencesPerCPUWorker) // div by sequences per cpu worker to check worker reset limit
 			if sequencesTested > uint64(worker.fuzzer.config.Fuzzing.WorkerResetLimit) {
 				// Close the chain to free resources
-				if worker.chain != nil {
-					worker.chain.Close()
-					worker.chain = nil
-				}
+				// GPU workers we will not free the chain, just keep it to run at the end
+				// if worker.chain != nil {
+				// 	worker.chain.Close()
+				// 	worker.chain = nil
+				// }
 				worker.workerMetrics().sequencesTested = big.NewInt(0)
 			}
 		}(i)
@@ -1690,7 +1721,7 @@ func (f *Fuzzer) Start() error {
 	f.randomProvider = rand.New(rand.NewSource(1))
 
 	// CuEVM Debug: fixed number of CPU workers
-	f.numCPUWorkers = 2 * runtime.NumCPU()
+	f.numCPUWorkers = 1 //2 * runtime.NumCPU()
 	f.GPUchainInitiated = false
 	// Round up the total workers to be a multiple of numCPUWorkers
 	f.config.Fuzzing.Workers = ((f.config.Fuzzing.Workers + f.numCPUWorkers - 1) / f.numCPUWorkers) * f.numCPUWorkers
