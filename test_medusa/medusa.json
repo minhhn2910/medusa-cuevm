@@ -1,10 +1,10 @@
 {
   "fuzzing": {
-    "workers": 10000,
+    "workers": 2000,
     "workerResetLimit": 50,
     "timeout": 30,
-    "testLimit": 50000,
-    "callSequenceLength": 3,
+    "testLimit": 10000,
+    "callSequenceLength": 5,
     "corpusDirectory": "",
     "coverageEnabled": true,
     "targetContracts": ["Test"],
@@ -22,9 +22,10 @@
       "stopOnNoTests": true,
       "testAllContracts": false,
       "traceAll": false,
+      "testViewMethods": true,
       "assertionTesting": {
         "enabled": true,
-        "testViewMethods": false,
+        "testViewMethods": true,
         "panicCodeConfig": {
           "failOnCompilerInsertedPanic": false,
           "failOnAssertion": true,

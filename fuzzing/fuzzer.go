@@ -1646,7 +1646,31 @@ func (f *Fuzzer) processWorkersResultsInParallel() (bool, error) {
 // RunAllSequences runs all sequences in the corpus and captures final coverage
 func (f *Fuzzer) RunAllSequences() {
 	callSequencesToTest := f.corpus.ExtractAllSequences()
+	selectedSender := f.senders[0]
+	// fmt.Println("Medusa_pureMethods:", f.workers[0].pureMethods)
+	// fmt.Println("Medusa_pureMethods_length:", len(f.workers[0].pureMethods))
+	for _, selectedMethod := range f.workers[0].pureMethods {
+		// fmt.Println("Medusa_method:", selectedMethod.Method.Name)
+		// Generate fuzzed parameters for the function call
+		args := make([]any, len(selectedMethod.Method.Inputs))
+		for i := 0; i < len(args); i++ {
+			// Create our fuzzed parameters.
+			input := selectedMethod.Method.Inputs[i]
+			args[i] = valuegeneration.GenerateAbiValue(f.workers[0].sequenceGenerator.config.ValueGenerator, &input.Type)
+		}
+		// If this is a payable function, generate value to send
+		var value *big.Int
+		value = big.NewInt(0)
+		msg := calls.NewCallMessageWithAbiValueData(selectedSender, &selectedMethod.Address, 0, value, f.config.Fuzzing.TransactionGasLimit, big.NewInt(1), big.NewInt(0), big.NewInt(0), &calls.CallMessageDataAbiValues{
+			Method:      &selectedMethod.Method,
+			InputValues: args,
+		})
 
+		callSequence := calls.CallSequence{calls.NewCallSequenceElement(selectedMethod.Contract, msg, uint64(0), uint64(0))}
+		// fmt.Println("Medusa_callSequence:", callSequence)
+		callSequencesToTest = append(callSequencesToTest, callSequence)
+
+	}
 	if len(callSequencesToTest) == 0 {
 		f.logger.Info("No sequences in corpus to run for final coverage")
 		return
@@ -1864,6 +1888,14 @@ func (f *Fuzzer) Start() error {
 
 	// Print our results on exit.
 	f.printExitingResults()
+
+	// print unique PC count for printing to the console
+	uniquePCs, err := coverage.GetUniquePCsCount(f.compilations, f.corpus.CoverageMaps(), f.logger)
+	if err != nil {
+		f.logger.Error("Failed to get unique PC count", err)
+		uniquePCs = 0
+	}
+	fmt.Println("Medusa_unique_PC_count:", uniquePCs)
 
 	// Finally, generate our coverage report if we have set a valid corpus directory.
 	if err == nil && len(f.config.Fuzzing.CoverageFormats) > 0 {
