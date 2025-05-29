@@ -1310,16 +1310,9 @@ func (f *Fuzzer) prepareAndProcessChainStateInGPU(testChain *chain.TestChain) er
 	fmt.Println("========================================================")
 
 	// codeCoverageLookupHash := getContractCoverageMapHash(code, isCreate)
-
+	var stateDump ethstate.Dump
 	// Get the current state from the chain
 	state := testChain.State()
-
-	eth_state, ok := state.(*ethstate.StateDB)
-
-	if state == nil || !ok {
-		return fmt.Errorf("chain state is nil")
-	}
-
 	// Get raw state dump
 	dumpConfig := &ethstate.DumpConfig{
 		SkipCode:    false,
@@ -1329,7 +1322,19 @@ func (f *Fuzzer) prepareAndProcessChainStateInGPU(testChain *chain.TestChain) er
 		Start:             nil,
 		Max:               1000,
 	}
-	stateDump := eth_state.RawDump(dumpConfig)
+
+	// eth_state, _ := state.(*ethstate.StateDB)
+	// Check for ForkStateDb first (since it embeds StateDB)
+	if forkState, ok := state.(*ethstate.ForkStateDb); ok {
+		fmt.Println("Using ForkStateDb")
+		// ForkStateDb embeds StateDB, so we can access the embedded StateDB
+		stateDump = forkState.StateDB.RawDump(dumpConfig)
+	} else if ethState, ok := state.(*ethstate.StateDB); ok {
+		fmt.Println("Using vanilla StateDB")
+		stateDump = ethState.RawDump(dumpConfig)
+	} else {
+		return fmt.Errorf("unsupported state type: %T", state)
+	}
 
 	// Convert state dump to JSON format
 	stateJSON := convertStateToJSON(&stateDump, testChain.Head().Header)
@@ -1721,7 +1726,7 @@ func (f *Fuzzer) Start() error {
 	f.randomProvider = rand.New(rand.NewSource(1))
 
 	// CuEVM Debug: fixed number of CPU workers
-	f.numCPUWorkers = 1 //2 * runtime.NumCPU()
+	f.numCPUWorkers = 2 * runtime.NumCPU()
 	f.GPUchainInitiated = false
 	// Round up the total workers to be a multiple of numCPUWorkers
 	f.config.Fuzzing.Workers = ((f.config.Fuzzing.Workers + f.numCPUWorkers - 1) / f.numCPUWorkers) * f.numCPUWorkers
