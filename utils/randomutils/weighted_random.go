@@ -5,7 +5,6 @@ import (
 	"math/big"
 	"math/rand"
 	"sync"
-	"time"
 	"unsafe"
 )
 
@@ -45,7 +44,8 @@ type WeightedRandomChooser[T any] struct {
 
 // NewWeightedRandomChooser creates a WeightedRandomChooser with a new random provider and mutex lock.
 func NewWeightedRandomChooser[T any]() *WeightedRandomChooser[T] {
-	return NewWeightedRandomChooserWithRand[T](rand.New(rand.NewSource(time.Now().Unix())), &sync.Mutex{})
+	// return NewWeightedRandomChooserWithRand[T](rand.New(rand.NewSource(time.Now().Unix())), &sync.Mutex{})
+	return NewWeightedRandomChooserWithRand[T](rand.New(rand.NewSource(1)), &sync.Mutex{})
 }
 
 // NewWeightedRandomChooserWithRand creates a WeightedRandomChooser with the provided random provider and mutex lock to be acquired when using it.
@@ -61,6 +61,16 @@ func NewWeightedRandomChooserWithRand[T any](randomProvider *rand.Rand, randomPr
 // ChoiceCount returns the count of choices added to this provider.
 func (c *WeightedRandomChooser[T]) ChoiceCount() int {
 	return len(c.choices)
+}
+
+// add a function to print the choices
+func (c *WeightedRandomChooser[T]) PrintChoices() {
+	fmt.Println("Printing WeightedRandomChooser choices:")
+	for _, choice := range c.choices {
+		fmt.Printf("choice data: %v\n", choice.Data)
+		fmt.Printf("choice weight: %v\n", choice.weight)
+		fmt.Println()
+	}
 }
 
 // AddChoices adds weighted choices to the WeightedRandomChooser, allowing for future random selection.

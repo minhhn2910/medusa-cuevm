@@ -417,6 +417,9 @@ func (c *Corpus) addCallSequence(sequenceFiles *corpusDirectory[calls.CallSequen
 
 	// Update our corpus directory with the new entry.
 	fileName := fmt.Sprintf("%v-%v.json", time.Now().UnixNano(), uuid.New().String())
+	fmt.Println("Adding sequence to corpus, weight: ", mutationChooserWeight, "fileName: ", fileName)
+	fmt.Println("Sequence ", sequence)
+
 	err = sequenceFiles.addFile(fileName, sequence)
 	if err != nil {
 		return err
@@ -507,6 +510,7 @@ func (c *Corpus) ExtractAllSequences() []calls.CallSequence {
 	for _, file := range c.callSequenceFiles.files {
 		callSequencesToTest = append(callSequencesToTest, file.data)
 	}
+	c.mutationTargetSequenceChooser.PrintChoices()
 	return callSequencesToTest
 }
 

@@ -378,6 +378,7 @@ func SimulateExecuteCallSequenceGPUWithList(
 
 	// Loop through each sequence element in our provided list
 	for _, callSequenceElement := range elements {
+		callSequenceElement.Call.FillFromTestChainProperties(chain)
 
 		// If we have a pending block, but we intend to delay this call from the last, we commit that block.
 		if chain.PendingBlock() != nil && callSequenceElement.BlockNumberDelay > 0 {
@@ -404,16 +405,18 @@ func SimulateExecuteCallSequenceGPUWithList(
 			if numberDelay > timeDelay {
 				numberDelay = timeDelay
 			}
+
 			_, err := chain.PendingBlockCreateWithParameters(chain.Head().Header.Number.Uint64()+numberDelay, chain.Head().Header.Time+timeDelay, nil)
+
 			if err != nil {
 				return callSequenceExecuted, err
 			}
 		}
-
 		// Try to add our transaction to this block.
 		err := chain.PendingBlockAddTx(callSequenceElement.Call.ToCoreMessage(), additionalTracers...)
 
 		if err != nil {
+			fmt.Println("CuEVM Debug: SimulateExecuteCallSequenceGPUWithList err", err)
 			// If we encountered a block gas limit error, this tx is too expensive to fit in this block.
 			// If there are other transactions in the block, this makes sense. The block is "full".
 			// In that case, we commit the pending block without this tx, and create a new pending block to add

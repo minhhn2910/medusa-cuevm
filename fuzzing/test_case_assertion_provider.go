@@ -1,7 +1,6 @@
 package fuzzing
 
 import (
-	"fmt"
 	"math/big"
 	"sync"
 
@@ -72,10 +71,10 @@ func (t *AssertionTestCaseProvider) checkAssertionFailures(callSequence calls.Ca
 	// have a panic code.
 	lastExecutionResult := lastCall.ChainReference.MessageResults().ExecutionResult
 	panicCode := abiutils.GetSolidityPanicCode(lastExecutionResult.Err, lastExecutionResult.ReturnData, true)
-	fmt.Printf("CuEVM debug: Assertion check - Error: %v, ReturnData: %v, PanicCode: %v\n",
-		lastExecutionResult.Err,
-		lastExecutionResult.ReturnData,
-		panicCode)
+	// fmt.Printf("CuEVM debug: Assertion check - Error: %v, ReturnData: %v, PanicCode: %v\n",
+	// 	lastExecutionResult.Err,
+	// 	lastExecutionResult.ReturnData,
+	// 	panicCode)
 	failure := false
 	if panicCode != nil {
 		failure = encounteredAssertionFailure(panicCode.Uint64(), t.fuzzer.config.Fuzzing.Testing.AssertionTesting.PanicCodeConfig)
@@ -243,7 +242,7 @@ func (t *AssertionTestCaseProvider) callSequencePostCallTest(worker *FuzzerWorke
 // GPUPostCallTest provides is a CallSequenceTestFunc that performs post-call testing logic for the attached Fuzzer
 // and any underlying FuzzerWorker. It is called after every call made in a call sequence. It checks whether invariants
 // in methods to test are upheld after each call the Fuzzer makes when testing a call sequence.
-func (t *AssertionTestCaseProvider) GPUPostCallTest(workers []*FuzzerWorker, gpuResult *coverage.GPUExecutionResult) (bool, error) {
+func (t *AssertionTestCaseProvider) GPUPostCallTest(workers []*FuzzerWorker, gpuResult *coverage.GPUExecutionResult, bigIntWeightValue *big.Int) (bool, error) {
 
 	// var globalShrinkRequestsAdded int32 // 0 for false, 1 for true (atomic)
 	total_calls_tested_per_worker := workers[0].fuzzer.sequencesPerCPUWorker * workers[0].fuzzer.config.Fuzzing.CallSequenceLength
@@ -274,7 +273,7 @@ func (t *AssertionTestCaseProvider) GPUPostCallTest(workers []*FuzzerWorker, gpu
 			for i := 0; i <= elementIdx; i++ {
 				fullSequence[i] = workers[workerIdx].callSequenceElements[sequenceIdx][i]
 			}
-			// fmt.Println("CuEVM Debug: callSequence having bug", fullSequence)
+			workers[workerIdx].fuzzer.corpus.AddCallSequence(fullSequence, bigIntWeightValue)
 			lastCall := fullSequence[len(fullSequence)-1]
 			lastCallMethod, err := lastCall.Method()
 			if err != nil {
@@ -295,38 +294,44 @@ func (t *AssertionTestCaseProvider) GPUPostCallTest(workers []*FuzzerWorker, gpu
 			if testCase.Status() == TestCaseStatusFailed {
 				continue
 			}
+			if _, exists := bugPCsProcessed[rawPC]; exists {
+				continue
+			}
 
 			if testFailed {
-				if _, exists := bugPCsProcessed[rawPC]; !exists {
-					// Create a request to shrink this call sequence.
-					shrinkRequest := ShrinkCallSequenceRequest{
-						TestName:             testCase.Name(),
-						CallSequenceToShrink: fullSequence,
-						VerifierFunction: func(shrinkVerifierWorker *FuzzerWorker, shrunkenCallSequence calls.CallSequence) (bool, error) {
-							shrunkSeqMethodId, shrunkSeqTestFailed, errVerify := t.checkAssertionFailures(shrunkenCallSequence)
-							if errVerify != nil {
-								return false, errVerify
-							}
-							return shrunkSeqTestFailed && methodId == *shrunkSeqMethodId, nil
-						},
-						FinishedCallback: func(finishedCallbackWorker *FuzzerWorker, shrunkenCallSequence calls.CallSequence, verbosity config.VerbosityLevel) error {
-							if len(shrunkenCallSequence) > 0 {
-								_, errCb := calls.ExecuteCallSequenceWithExecutionTracer(finishedCallbackWorker.chain, finishedCallbackWorker.fuzzer.contractDefinitions, shrunkenCallSequence, verbosity)
-								if errCb != nil {
-									return errCb
+				// CuEVM 6 June temporarily disable shrink requests
+				/*
+					 {
+						// Create a request to shrink this call sequence.
+						shrinkRequest := ShrinkCallSequenceRequest{
+							TestName:             testCase.Name(),
+							CallSequenceToShrink: fullSequence,
+							VerifierFunction: func(shrinkVerifierWorker *FuzzerWorker, shrunkenCallSequence calls.CallSequence) (bool, error) {
+								shrunkSeqMethodId, shrunkSeqTestFailed, errVerify := t.checkAssertionFailures(shrunkenCallSequence)
+								if errVerify != nil {
+									return false, errVerify
 								}
-							}
-							testCase.status = TestCaseStatusFailed
-							testCase.callSequence = &shrunkenCallSequence
-							finishedCallbackWorker.workerMetrics().failedSequences.Add(finishedCallbackWorker.workerMetrics().failedSequences, big.NewInt(1))
-							finishedCallbackWorker.Fuzzer().ReportTestCaseFinished(testCase)
-							return nil
-						},
-						RecordResultInCorpus: true,
+								return shrunkSeqTestFailed && methodId == *shrunkSeqMethodId, nil
+							},
+							FinishedCallback: func(finishedCallbackWorker *FuzzerWorker, shrunkenCallSequence calls.CallSequence, verbosity config.VerbosityLevel) error {
+								if len(shrunkenCallSequence) > 0 {
+									_, errCb := calls.ExecuteCallSequenceWithExecutionTracer(finishedCallbackWorker.chain, finishedCallbackWorker.fuzzer.contractDefinitions, shrunkenCallSequence, verbosity)
+									if errCb != nil {
+										return errCb
+									}
+								}
+								testCase.status = TestCaseStatusFailed
+								testCase.callSequence = &shrunkenCallSequence
+								finishedCallbackWorker.workerMetrics().failedSequences.Add(finishedCallbackWorker.workerMetrics().failedSequences, big.NewInt(1))
+								finishedCallbackWorker.Fuzzer().ReportTestCaseFinished(testCase)
+								return nil
+							},
+							RecordResultInCorpus: true,
+						}
+						newShrinkRequests[workerIdx] = append(newShrinkRequests[workerIdx], shrinkRequest)
+						bugPCsProcessed[rawPC] = true
 					}
-					newShrinkRequests[workerIdx] = append(newShrinkRequests[workerIdx], shrinkRequest)
-					bugPCsProcessed[rawPC] = true
-				}
+				*/
 			}
 		}
 	}
@@ -338,7 +343,7 @@ func (t *AssertionTestCaseProvider) GPUPostCallTest(workers []*FuzzerWorker, gpu
 		}
 		// fmt.Println("CuEVM Debug: workerIdx", workerIdx, "pendingShrinkRequests", len(worker.pendingShrinkRequests))
 	}
-
+	// fmt.Println("CuEVM Debug: total_bugs_encountered", total_bugs_encountered)
 	return total_bugs_encountered > 0, nil
 }
 

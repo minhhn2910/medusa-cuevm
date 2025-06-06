@@ -464,12 +464,12 @@ func (fw *FuzzerWorker) testShrunkenCallSequence(possibleShrunkSequence calls.Ca
 func (fw *FuzzerWorker) shrinkCallSequence(shrinkRequest ShrinkCallSequenceRequest) (calls.CallSequence, error) {
 	// Define a variable to track our most optimized sequence across all optimization iterations.
 	optimizedSequence := shrinkRequest.CallSequenceToShrink
-
+	fmt.Println("CuEVM Debug: shrinkCallSequence start")
 	// Obtain our shrink limits and begin shrinking.
 	shrinkIteration := uint64(0)
-	// shrinkLimit := fw.fuzzer.config.Fuzzing.ShrinkLimit
+	shrinkLimit := fw.fuzzer.config.Fuzzing.ShrinkLimit
 	// TODO: March 2025 temporarily disable shrinking, todo: reenable
-	shrinkLimit := uint64(0)
+	// shrinkLimit := uint64(0)
 	shrinkingEnded := func() bool {
 		return shrinkIteration >= shrinkLimit || utils.CheckContextDone(fw.fuzzer.emergencyCtx)
 	}
@@ -553,9 +553,10 @@ func (fw *FuzzerWorker) shrinkCallSequence(shrinkRequest ShrinkCallSequenceReque
 		}
 		fw.workerMetrics().shrinking = false
 	}
-
+	fmt.Println("CuEVM Debug: shrinkCallSequence end")
 	// If the shrink request wanted the sequence recorded in the corpus, do so now.
 	if shrinkRequest.RecordResultInCorpus {
+		fmt.Println("CuEVM Debug: adding test result call sequence to corpus, weight: ", fw.getNewCorpusCallSequenceWeight())
 		err := fw.fuzzer.corpus.AddTestResultCallSequence(optimizedSequence, fw.getNewCorpusCallSequenceWeight(), true)
 		if err != nil {
 			return nil, err

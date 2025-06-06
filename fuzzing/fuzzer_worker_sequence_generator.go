@@ -255,15 +255,26 @@ func (g *CallSequenceGenerator) PopSequenceElement() (*calls.CallSequenceElement
 		// our call prior to return. This allows mutations to be applied on a per-call time frame, rather than
 		// per-sequence, making use of the most recent runtime data.
 		if g.prefetchModifyCallFunc != nil {
-			err = g.prefetchModifyCallFunc(g, element)
+			// fmt.Println("CuEVM Debug: prefetchModifyCallFunc", g.prefetchModifyCallFunc)
+			// fmt.Println("CuEVM Debug: element", element)
+			var new_element, err = element.Clone()
+			if err != nil {
+				fmt.Println("CuEVM Debug: element Clone err", err)
+				return nil, err
+			}
+			err = g.prefetchModifyCallFunc(g, new_element)
+			element = new_element
+			// fmt.Println("CuEVM Debug: prefetchModifyCallFunc err", err)
+			// fmt.Println("CuEVM Debug: element", element)
+			// fmt.Println("CuEVM Debug: element after prefetchModifyCallFunc", new_element)
 			if err != nil {
 				return nil, err
 			}
 		} else {
+
 			// CUEVM modify
 			// If this is a payable function, generate value to send
-			var value *big.Int
-			value = big.NewInt(0)
+			var value = big.NewInt(0)
 			selectedMethod := element.Call.DataAbiValues.Method
 			if selectedMethod.StateMutability == "payable" {
 				value = g.config.ValueGenerator.GenerateInteger(false, 64)
@@ -278,9 +289,28 @@ func (g *CallSequenceGenerator) PopSequenceElement() (*calls.CallSequenceElement
 			// CUEVM debug perf , disable value mutation
 			// args := element.Call.DataAbiValues.InputValues
 			selectedContract := element.Contract
-			blockNumberDelay := element.BlockNumberDelay
-			blockTimestampDelay := element.BlockTimestampDelay
-			msg := calls.NewCallMessageWithAbiValueData(element.Call.From, element.Call.To, 0, value, g.worker.fuzzer.config.Fuzzing.TransactionGasLimit, nil, nil, nil, &calls.CallMessageDataAbiValues{
+
+			// TODO: adjust this if needed
+			blockNumberDelay := uint64(0)
+			blockTimestampDelay := uint64(0)
+			if g.worker.fuzzer.config.Fuzzing.MaxBlockNumberDelay > 0 {
+				blockNumberDelay = g.config.ValueGenerator.GenerateInteger(false, 64).Uint64() % (g.worker.fuzzer.config.Fuzzing.MaxBlockNumberDelay + 1)
+			}
+			if g.worker.fuzzer.config.Fuzzing.MaxBlockTimestampDelay > 0 {
+				blockTimestampDelay = g.config.ValueGenerator.GenerateInteger(false, 64).Uint64() % (g.worker.fuzzer.config.Fuzzing.MaxBlockTimestampDelay + 1)
+			}
+			selectedSender := g.worker.fuzzer.senders[g.worker.randomProvider.Intn(len(g.worker.fuzzer.senders))]
+
+			// For each block we jump, we need a unique time stamp for chain semantics, so if our block number jump is too small,
+			// while our timestamp jump is larger, we cap it.
+			if blockNumberDelay > blockTimestampDelay {
+				if blockTimestampDelay == 0 {
+					blockNumberDelay = 0
+				} else {
+					blockNumberDelay %= blockTimestampDelay
+				}
+			}
+			msg := calls.NewCallMessageWithAbiValueData(selectedSender, element.Call.To, 0, value, g.worker.fuzzer.config.Fuzzing.TransactionGasLimit, nil, nil, nil, &calls.CallMessageDataAbiValues{
 				Method:      selectedMethod,
 				InputValues: args,
 			})
@@ -316,7 +346,9 @@ func (g *CallSequenceGenerator) generateNewElement() (*calls.CallSequenceElement
 	// Select a random method
 	// There is a 1/1000 chance that a pure method will be invoked or if there are only pure functions that are callable
 	var selectedMethod *contracts.DeployedContractMethod
-	if (len(g.worker.pureMethods) > 0 && g.worker.randomProvider.Intn(1000) == 0) || callOnlyPureFunctions {
+	// CuEVM: many txs in paralel so we can afford to increase this chance
+	if (len(g.worker.pureMethods) > 0 && g.worker.randomProvider.Intn(100) == 1) || callOnlyPureFunctions {
+		// if (len(g.worker.pureMethods) > 0 && g.worker.randomProvider.Intn(1000) == 0) || callOnlyPureFunctions {
 		selectedMethod = &g.worker.pureMethods[g.worker.randomProvider.Intn(len(g.worker.pureMethods))]
 	} else {
 		selectedMethod = &g.worker.stateChangingMethods[g.worker.randomProvider.Intn(len(g.worker.stateChangingMethods))]
