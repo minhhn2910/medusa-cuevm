@@ -511,6 +511,7 @@ func (c *Corpus) ExtractAllSequences() []calls.CallSequence {
 		callSequencesToTest = append(callSequencesToTest, file.data)
 	}
 	c.mutationTargetSequenceChooser.PrintChoices()
+	fmt.Println("\n\n Medusa: ExtractAllSequences\n\n")
 	return callSequencesToTest
 }
 

@@ -260,6 +260,7 @@ func (t *AssertionTestCaseProvider) GPUPostCallTest(workers []*FuzzerWorker, gpu
 		worker.workerMetrics().gasUsed.Add(worker.workerMetrics().gasUsed, new(big.Int).SetUint64(0))
 
 	}
+	skipSequenceSize := t.fuzzer.skipSequenceSize
 	total_bugs_encountered := 0
 	for batchIdx := 0; batchIdx < len(gpuResult.NewBugIndices); batchIdx++ {
 		total_bugs_encountered += len(gpuResult.NewBugIndices[batchIdx])
@@ -272,6 +273,24 @@ func (t *AssertionTestCaseProvider) GPUPostCallTest(workers []*FuzzerWorker, gpu
 			fullSequence := make(calls.CallSequence, elementIdx+1)
 			for i := 0; i <= elementIdx; i++ {
 				fullSequence[i] = workers[workerIdx].callSequenceElements[sequenceIdx][i]
+				dataMarkers := workers[workerIdx].callSequenceElements[(sequenceIdx/skipSequenceSize)*skipSequenceSize][i].Call.DataMarkers
+
+				// fmt.Println("CuEVM Debug: dataMarkers", dataMarkers)
+				// fmt.Println("CuEVM Debug: idx", idx, "fullSequence[", i, "]")
+
+				mutatedData := workers[workerIdx].fuzzer.restore_mutation(fullSequence[i].Call.Data, dataMarkers, rawIdx, i)
+				inputData := mutatedData[4:] // skip the method ID
+				inputValues, err := fullSequence[i].Call.DataAbiValues.Method.Inputs.Unpack(inputData)
+				if err != nil {
+					// handle error
+				}
+				// fmt.Println("CuEVM debug original data ", hex.EncodeToString(fullSequence[i].Call.Data))
+				fullSequence[i].Call.DataAbiValues.InputValues = inputValues
+				fullSequence[i].Call.Data = mutatedData
+				// fmt.Println("CuEVM debug mutated data ", hex.EncodeToString(mutatedData))
+				// fmt.Println("CuEVM debug new inputValues", inputValues)
+
+				// fmt.Println("Call element", fullSequence[i])
 			}
 			workers[workerIdx].fuzzer.corpus.AddCallSequence(fullSequence, bigIntWeightValue)
 			lastCall := fullSequence[len(fullSequence)-1]
@@ -299,39 +318,36 @@ func (t *AssertionTestCaseProvider) GPUPostCallTest(workers []*FuzzerWorker, gpu
 			}
 
 			if testFailed {
-				// CuEVM 6 June temporarily disable shrink requests
-				/*
-					 {
-						// Create a request to shrink this call sequence.
-						shrinkRequest := ShrinkCallSequenceRequest{
-							TestName:             testCase.Name(),
-							CallSequenceToShrink: fullSequence,
-							VerifierFunction: func(shrinkVerifierWorker *FuzzerWorker, shrunkenCallSequence calls.CallSequence) (bool, error) {
-								shrunkSeqMethodId, shrunkSeqTestFailed, errVerify := t.checkAssertionFailures(shrunkenCallSequence)
-								if errVerify != nil {
-									return false, errVerify
-								}
-								return shrunkSeqTestFailed && methodId == *shrunkSeqMethodId, nil
-							},
-							FinishedCallback: func(finishedCallbackWorker *FuzzerWorker, shrunkenCallSequence calls.CallSequence, verbosity config.VerbosityLevel) error {
-								if len(shrunkenCallSequence) > 0 {
-									_, errCb := calls.ExecuteCallSequenceWithExecutionTracer(finishedCallbackWorker.chain, finishedCallbackWorker.fuzzer.contractDefinitions, shrunkenCallSequence, verbosity)
-									if errCb != nil {
-										return errCb
-									}
-								}
-								testCase.status = TestCaseStatusFailed
-								testCase.callSequence = &shrunkenCallSequence
-								finishedCallbackWorker.workerMetrics().failedSequences.Add(finishedCallbackWorker.workerMetrics().failedSequences, big.NewInt(1))
-								finishedCallbackWorker.Fuzzer().ReportTestCaseFinished(testCase)
-								return nil
-							},
-							RecordResultInCorpus: true,
+
+				// Create a request to shrink this call sequence.
+				shrinkRequest := ShrinkCallSequenceRequest{
+					TestName:             testCase.Name(),
+					CallSequenceToShrink: fullSequence,
+					VerifierFunction: func(shrinkVerifierWorker *FuzzerWorker, shrunkenCallSequence calls.CallSequence) (bool, error) {
+						shrunkSeqMethodId, shrunkSeqTestFailed, errVerify := t.checkAssertionFailures(shrunkenCallSequence)
+						if errVerify != nil {
+							return false, errVerify
 						}
-						newShrinkRequests[workerIdx] = append(newShrinkRequests[workerIdx], shrinkRequest)
-						bugPCsProcessed[rawPC] = true
-					}
-				*/
+						return shrunkSeqTestFailed && methodId == *shrunkSeqMethodId, nil
+					},
+					FinishedCallback: func(finishedCallbackWorker *FuzzerWorker, shrunkenCallSequence calls.CallSequence, verbosity config.VerbosityLevel) error {
+						if len(shrunkenCallSequence) > 0 {
+							_, errCb := calls.ExecuteCallSequenceWithExecutionTracer(finishedCallbackWorker.chain, finishedCallbackWorker.fuzzer.contractDefinitions, shrunkenCallSequence, verbosity)
+							if errCb != nil {
+								return errCb
+							}
+						}
+						testCase.status = TestCaseStatusFailed
+						testCase.callSequence = &shrunkenCallSequence
+						finishedCallbackWorker.workerMetrics().failedSequences.Add(finishedCallbackWorker.workerMetrics().failedSequences, big.NewInt(1))
+						finishedCallbackWorker.Fuzzer().ReportTestCaseFinished(testCase)
+						return nil
+					},
+					RecordResultInCorpus: true,
+				}
+				newShrinkRequests[workerIdx] = append(newShrinkRequests[workerIdx], shrinkRequest)
+				bugPCsProcessed[rawPC] = true
+
 			}
 		}
 	}

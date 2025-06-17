@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math/big"
 	"math/rand"
+	"sync"
 
 	"github.com/crytic/medusa/logging/colors"
 
@@ -49,6 +50,10 @@ type FuzzerWorker struct {
 	// the fuzzing loop. In the future we can generalize this to any type of "request" that must be handled immediately
 	// before the execution of the next call sequence.
 	shrinkCallSequenceRequests []ShrinkCallSequenceRequest
+
+	// CuEVM async equivalent of shrinkCallSequenceRequests
+	shrinkRequestChan chan ShrinkCallSequenceRequest
+	shrinkWg          sync.WaitGroup
 
 	// randomProvider provides random data as inputs to decisions throughout the worker.
 	randomProvider *rand.Rand
@@ -123,7 +128,22 @@ func newFuzzerWorker(fuzzer *Fuzzer, workerIndex int, randomProvider *rand.Rand)
 	worker.sequenceGenerator = NewCallSequenceGenerator(worker, callSequenceGenConfig)
 	worker.shrinkingValueMutator = shrinkingValueMutator
 
+	worker.shrinkRequestChan = make(chan ShrinkCallSequenceRequest, 32)
+	worker.shrinkWg.Add(1)
+	go worker.shrinkCallSequenceAsyncLoop()
 	return worker, nil
+}
+
+// The async loop (only one per worker):
+func (fw *FuzzerWorker) shrinkCallSequenceAsyncLoop() {
+	defer fw.shrinkWg.Done()
+	for req := range fw.shrinkRequestChan {
+
+		_, err := fw.shrinkCallSequence(req)
+		if err != nil {
+			fmt.Println("shrinkCallSequence error:", err)
+		}
+	}
 }
 
 // WorkerIndex returns the index of this FuzzerWorker in relation to its parent Fuzzer.
@@ -311,7 +331,7 @@ func (fw *FuzzerWorker) testNextCallSequence() ([]ShrinkCallSequenceRequest, err
 
 	// Our "fetch next call" method will generate new calls as needed, if we are generating a new sequence.
 	fetchElementFunc := func(currentIndex int) (*calls.CallSequenceElement, error) {
-		return fw.sequenceGenerator.PopSequenceElement()
+		return fw.sequenceGenerator.PopSequenceElement(false)
 	}
 
 	// Our "post execution check function" method will check coverage and call all testing functions. If one returns a
