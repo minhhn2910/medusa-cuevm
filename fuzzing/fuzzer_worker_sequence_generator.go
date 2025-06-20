@@ -1,11 +1,12 @@
 package fuzzing
 
 import (
-	"encoding/hex"
 	"fmt"
 	"math/big"
+	"reflect"
 	"regexp"
 
+	"github.com/crytic/medusa-geth/accounts/abi"
 	"github.com/crytic/medusa/fuzzing/calls"
 	"github.com/crytic/medusa/fuzzing/contracts"
 	"github.com/crytic/medusa/fuzzing/valuegeneration"
@@ -35,6 +36,9 @@ type CallSequenceGenerator struct {
 	// generateFromTail describes whether the CallSequenceGenerator generates a new call sequence from the tail
 	// of the corpus.
 	generateFromTail bool
+
+	// keep the array of array lengths that is already generated
+	generatedArrayLengths []int
 
 	// prefetchModifyCallFunc describes the method to use to mutate the next indexed call sequence element, prior
 	// to its fetching by PopSequenceElement.
@@ -199,7 +203,7 @@ func NewCallSequenceGenerator(worker *FuzzerWorker, config *CallSequenceGenerato
 // Returns a boolean indicating whether the initialized sequence is a newly generated sequence (rather than an
 // unmodified one loaded from the corpus), or an error if one occurred.
 func (g *CallSequenceGenerator) InitializeNextSequence() (bool, error) {
-	fmt.Println("\n\nCuEVM Debug: InitializeNextSequence\n\n")
+	// fmt.Println("\n\nCuEVM Debug: InitializeNextSequence\n\n")
 	g.generateFromTail = false
 	// Reset the state of our generator.
 	g.baseSequence = make(calls.CallSequence, g.worker.fuzzer.config.Fuzzing.CallSequenceLength)
@@ -221,13 +225,13 @@ func (g *CallSequenceGenerator) InitializeNextSequence() (bool, error) {
 	// If this provider has no corpus mutation methods or corpus call sequences, we return a call sequence with
 	// nil elements to signal that we want an entirely new sequence.
 	if g.mutationStrategyChooser.ChoiceCount() == 0 || g.worker.fuzzer.corpus.ActiveMutableSequenceCount() == 0 {
-		fmt.Println("CuEVM Debug: no corpus mutation methods or corpus call sequences")
+		// fmt.Println("CuEVM Debug: no corpus mutation methods or corpus call sequences")
 		return true, nil
 	}
 
 	// Determine whether we will generate a corpus based mutated sequence.
 	if g.worker.randomProvider.Float32() > g.config.NewSequenceProbability {
-		fmt.Println("CuEVM Debug: generate a corpus based mutated sequence")
+		// fmt.Println("CuEVM Debug: generate a corpus based mutated sequence")
 		// Get a random mutator function.
 		corpusMutationFunc, err := g.mutationStrategyChooser.Choose()
 		if err != nil {
@@ -304,7 +308,7 @@ func (g *CallSequenceGenerator) PopSequenceElement(isFirstSequence bool) (*calls
 						}
 						contractName := elem.Contract.Name()
 						functionName := elem.Call.DataAbiValues.Method.Sig
-						fmt.Println("CuEVM Debug: functionName", functionName)
+						// fmt.Println("CuEVM Debug: functionName", functionName)
 						// Find relations for this contract
 						relations, ok := g.worker.fuzzer.slitherResults.FunctionRelations[contractName]
 
@@ -314,7 +318,7 @@ func (g *CallSequenceGenerator) PopSequenceElement(isFirstSequence bool) (*calls
 						// Find the relation for this function
 						for _, rel := range relations {
 							if rel.Function == functionName {
-								fmt.Println("CuEVM Debug: rel.Function", rel.Function)
+								// fmt.Println("CuEVM Debug: rel.Function", rel.Function)
 								// Add all impacted functions to the pool
 								for _, impacted := range rel.Impacts {
 									pool = append(pool, impacted)
@@ -328,7 +332,7 @@ func (g *CallSequenceGenerator) PopSequenceElement(isFirstSequence bool) (*calls
 					for _, elem := range g.worker.fuzzer.slitherResults.FunctionRelations {
 						for _, rel := range elem {
 							if len(rel.Impacts) > 0 {
-								fmt.Println("CuEVM Debug: rel.Function", rel.Function)
+								// fmt.Println("CuEVM Debug: rel.Function", rel.Function)
 								pool = append(pool, rel.Function)
 							}
 						}
@@ -336,9 +340,9 @@ func (g *CallSequenceGenerator) PopSequenceElement(isFirstSequence bool) (*calls
 				}
 			}
 		}
-		fmt.Println("CuEVM Debug: function relation pool", pool)
+		// fmt.Println("CuEVM Debug: function relation pool", pool)
 
-		elementWithMask, masks, err := g.generateNewElementWithMutationMask(pool)
+		elementWithMask, _, err := g.generateNewElementWithMutationMask(pool)
 		if err != nil {
 			return nil, err
 		}
@@ -346,10 +350,10 @@ func (g *CallSequenceGenerator) PopSequenceElement(isFirstSequence bool) (*calls
 
 		// Debug print the masks
 		if element.Call != nil && element.Call.DataAbiValues != nil {
-			fmt.Printf("CuEVM Debug: Method: %s\n", element.Call.DataAbiValues.Method)
-			fmt.Println("CuEVM Debug: masks", masks)
-			// print as hex
-			fmt.Println("CuEVM Debug: element data ", hex.EncodeToString(element.Call.Data))
+			// fmt.Printf("CuEVM Debug: Method: %s\n", element.Call.DataAbiValues.Method)
+			// fmt.Println("CuEVM Debug: masks", masks)
+			// // print as hex
+			// fmt.Println("CuEVM Debug: element data ", hex.EncodeToString(element.Call.Data))
 
 		}
 
@@ -547,7 +551,7 @@ func (g *CallSequenceGenerator) generateNewElementWithMutationMask(candidate_poo
 
 		found_method := false
 		for _, method := range g.worker.stateChangingMethods {
-			fmt.Println("CuEVM Debug: method.Method.Sig", method.Method.Sig)
+			// fmt.Println("CuEVM Debug: method.Method.Sig", method.Method.Sig)
 			if normalizeSignature(method.Method.Sig) == normalizeSignature(selectedCandidate) {
 				selectedMethod = &method
 				found_method = true
@@ -563,7 +567,7 @@ func (g *CallSequenceGenerator) generateNewElementWithMutationMask(candidate_poo
 				}
 			}
 		}
-		fmt.Println("CuEVM Debug: found_method", found_method)
+		// fmt.Println("CuEVM Debug: found_method", found_method)
 		if !found_method {
 			selectedMethod = &g.worker.stateChangingMethods[g.worker.randomProvider.Intn(len(g.worker.stateChangingMethods))]
 		}
@@ -582,10 +586,30 @@ func (g *CallSequenceGenerator) generateNewElementWithMutationMask(candidate_poo
 
 	// Generate fuzzed parameters for the function call
 	args := make([]any, len(selectedMethod.Method.Inputs))
+	g.generatedArrayLengths = make([]int, 0)
 	for i := 0; i < len(args); i++ {
 		// Create our fuzzed parameters.
 		input := selectedMethod.Method.Inputs[i]
-		args[i] = valuegeneration.GenerateAbiValue(g.config.ValueGenerator, &input.Type)
+		// args[i] = valuegeneration.GenerateAbiValue(g.config.ValueGenerator, &input.Type)
+		if len(g.generatedArrayLengths) == 0 {
+			args[i] = valuegeneration.GenerateAbiValueWithArrayLength(g.config.ValueGenerator, &input.Type, -1)
+		} else {
+			// 50% chance to use the existing array length
+			if g.worker.randomProvider.Intn(2) == 0 {
+				args[i] = valuegeneration.GenerateAbiValueWithArrayLength(g.config.ValueGenerator, &input.Type, -1)
+			} else {
+				random_idx := g.worker.randomProvider.Intn(len(g.generatedArrayLengths))
+				args[i] = valuegeneration.GenerateAbiValueWithArrayLength(g.config.ValueGenerator, &input.Type, g.generatedArrayLengths[random_idx])
+			}
+		}
+		// fmt.Println("CuEVM Debug: args[i]", args[i])
+		// fmt.Println("CuEVM Debug: input.Type", input.Type)
+		if input.Type.T == abi.SliceTy {
+			reflectValue := reflect.ValueOf(args[i])
+			actualLength := reflectValue.Len() // This will give you the length
+			g.generatedArrayLengths = append(g.generatedArrayLengths, actualLength)
+			// fmt.Println("CuEVM Debug: generatedArrayLengths", g.generatedArrayLengths)
+		}
 	}
 
 	// If this is a payable function, generate value to send
@@ -636,7 +660,7 @@ func (g *CallSequenceGenerator) generateNewElementWithMutationMask(candidate_poo
 // whose head is based off of an existing corpus call sequence.
 // Returns an error if one occurs.
 func callSeqGenFuncCorpusHead(sequenceGenerator *CallSequenceGenerator, sequence calls.CallSequence) error {
-
+	// fmt.Println("CuEVM Debug: callSeqGenFuncCorpusHead")
 	// Obtain a call sequence from the corpus
 	corpusSequence, err := sequenceGenerator.worker.fuzzer.corpus.RandomMutationTargetSequence()
 	if err != nil {

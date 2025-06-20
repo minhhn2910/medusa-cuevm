@@ -137,8 +137,10 @@ func newFuzzerWorker(fuzzer *Fuzzer, workerIndex int, randomProvider *rand.Rand)
 // The async loop (only one per worker):
 func (fw *FuzzerWorker) shrinkCallSequenceAsyncLoop() {
 	defer fw.shrinkWg.Done()
-	for req := range fw.shrinkRequestChan {
 
+	for req := range fw.shrinkRequestChan {
+		// fmt.Println("CuEVM Debug: shrinkCallSequenceAsyncLoop req", req)
+		fw.chain.RevertToBlockIndex(fw.testingBaseBlockIndex)
 		_, err := fw.shrinkCallSequence(req)
 		if err != nil {
 			fmt.Println("shrinkCallSequence error:", err)
@@ -484,6 +486,9 @@ func (fw *FuzzerWorker) testShrunkenCallSequence(possibleShrunkSequence calls.Ca
 func (fw *FuzzerWorker) shrinkCallSequence(shrinkRequest ShrinkCallSequenceRequest) (calls.CallSequence, error) {
 	// Define a variable to track our most optimized sequence across all optimization iterations.
 	optimizedSequence := shrinkRequest.CallSequenceToShrink
+	// for _, element := range optimizedSequence {
+	// 	element.Call.FillFromTestChainProperties(fw.chain)
+	// }
 	fmt.Println("CuEVM Debug: shrinkCallSequence start")
 	// Obtain our shrink limits and begin shrinking.
 	shrinkIteration := uint64(0)

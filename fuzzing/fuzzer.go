@@ -122,7 +122,7 @@ SimplifiedGPUResultC* process_batch_transactions(const uint64_t* blockNumber, co
 
 // Updated function declaration with reset_state parameter
 // int process_json_state_gpu(const char* json_state, uint32_t num_instances, bool reset_state);
-int process_json_state_gpu(const char* json_state, uint32_t num_instances, bool reset_state, uint32_t skipTxSize);
+int process_json_state_gpu(const char* json_state, uint32_t num_instances, bool reset_state, uint32_t skipTxSize, const char* constants);
 
 uint32_t get_num_instances_per_device();
 
@@ -220,6 +220,9 @@ type Fuzzer struct {
 	originalNonceMap map[common.Address]uint64
 	// CuEVM debug: shrink workers
 	shrinkWorkers []*FuzzerWorker
+
+	addressConstants []string // hex string
+	integerConstants []string // hex string
 
 	// CuEVM debug: for directly calling in fuzzing loop
 	property_test_provider     *PropertyTestCaseProvider
@@ -346,6 +349,8 @@ func NewFuzzer(config config.ProjectConfig) (*Fuzzer, error) {
 	if fuzzer.config.Fuzzing.Testing.OptimizationTesting.Enabled {
 		fuzzer.optimization_test_provider = attachOptimizationTestCaseProvider(fuzzer)
 	}
+	// CuEVM Debug: constant skip sequence size
+	fuzzer.skipSequenceSize = 16
 	return fuzzer, nil
 }
 
@@ -744,9 +749,9 @@ func getDefaultRandomValueGeneratorConfig() *valuegeneration.RandomValueGenerato
 		GenerateRandomArrayMinSize:  0,
 		GenerateRandomArrayMaxSize:  16,
 		GenerateRandomBytesMinSize:  0,
-		GenerateRandomBytesMaxSize:  16,
+		GenerateRandomBytesMaxSize:  64,
 		GenerateRandomStringMinSize: 0,
-		GenerateRandomStringMaxSize: 16,
+		GenerateRandomStringMaxSize: 64,
 	}
 }
 
@@ -786,7 +791,7 @@ func defaultCallSequenceGeneratorConfigFunc(fuzzer *Fuzzer, valueSet *valuegener
 		RandomMutatedCorpusTailWeight:            10,
 		RandomMutatedSpliceAtRandomWeight:        20,
 		RandomMutatedInterleaveAtRandomWeight:    10,
-		FunctionRelationBias:                     0.8, // CuEVM: mutate based on function relations
+		FunctionRelationBias:                     0.9, // CuEVM: mutate based on function relations 0.8
 		ValueGenerator:                           mutationalGenerator,
 		ValueMutator:                             mutationalGenerator,
 	}
@@ -866,7 +871,7 @@ func (f *Fuzzer) spawnWorkersLoop(baseTestChain *chain.TestChain) error {
 		shrinkWorker.testingBaseBlockIndex = uint64(len(shrinkWorker.chain.CommittedBlocks()))
 		f.shrinkWorkers[i] = shrinkWorker
 	}
-	f.skipSequenceSize = 16
+
 	f.loopCounter = 0
 	f.PrepareNonce(baseTestChain)
 	// Main processing loop
@@ -899,9 +904,9 @@ func (f *Fuzzer) spawnWorkersLoop(baseTestChain *chain.TestChain) error {
 		}
 
 		f.loopCounter++
-		if f.loopCounter == 5 {
-			working = false
-		}
+		// if f.loopCounter == 1 {
+		// 	working = false
+		// }
 		// CuEVM Debug
 		fmt.Printf("\n Medusa loop counter: %d\n", f.loopCounter)
 
@@ -1121,6 +1126,7 @@ func (f *Fuzzer) prepareWorkersDataInParallel(baseTestChain *chain.TestChain) (b
 			for seqIdx := 0; seqIdx < f.sequencesPerCPUWorker; seqIdx++ {
 				// fmt.Println("\n\nCuEVM Debug: seqIdx\n\n", seqIdx)
 				// Initialize a new sequence within our sequence generator
+
 				if seqIdx%f.skipSequenceSize == 0 {
 					isNewSequence, err := worker.sequenceGenerator.InitializeNextSequence()
 					if err != nil {
@@ -1135,6 +1141,7 @@ func (f *Fuzzer) prepareWorkersDataInParallel(baseTestChain *chain.TestChain) (b
 					// soft reset, the same sequence generator but different input values
 					worker.sequenceGenerator.fetchIndex = 0
 				}
+
 				// CuEVM debug always use new sequence generator
 				// isNewSequence, err := worker.sequenceGenerator.InitializeNextSequence()
 				// if err != nil {
@@ -1293,9 +1300,9 @@ func (f *Fuzzer) runTransactionsGPU(workers []*FuzzerWorker) (*coverage.GPUExecu
 				if idx%f.skipSequenceSize == 0 {
 					markerOffsets = append(markerOffsets, uint32(markerOffset))
 					markerCounts = append(markerCounts, uint32(len(call.DataMarkers)))
-					fmt.Println("CuEVM Debug: idx", idx, "call.DataMarkers length", len(call.DataMarkers))
+					// fmt.Println("CuEVM Debug: idx", idx, "call.DataMarkers length", len(call.DataMarkers))
 					for _, marker := range call.DataMarkers {
-						fmt.Println("CuEVM Debug: marker", idx, marker.Offset, marker.Type, marker.Length)
+						// fmt.Println("CuEVM Debug: marker", idx, marker.Offset, marker.Type, marker.Length)
 						markerData = append(markerData, uint32(marker.Offset))
 						markerData = append(markerData, uint32(marker.Type))
 						markerData = append(markerData, uint32(marker.Length))
@@ -1430,7 +1437,7 @@ func (f *Fuzzer) runTransactionsGPU(workers []*FuzzerWorker) (*coverage.GPUExecu
 func (f *Fuzzer) prepareAndProcessChainStateInGPU(testChain *chain.TestChain) error {
 	if f.GPUchainInitiated {
 		fmt.Println("\n\n GPU chain already initiated, skipping JSON dump state\n\n")
-		result := C.process_json_state_gpu(nil, C.uint(f.config.Fuzzing.Workers), true, C.uint(f.skipSequenceSize))
+		result := C.process_json_state_gpu(nil, C.uint(f.config.Fuzzing.Workers), true, C.uint(f.skipSequenceSize), nil)
 		if result != 0 {
 			return fmt.Errorf("C++ GPU state processing returned error code: %d", result)
 		}
@@ -1449,6 +1456,7 @@ func (f *Fuzzer) prepareAndProcessChainStateInGPU(testChain *chain.TestChain) er
 					contract.Name(), addr.Hex(), codeHash.Hex())
 				continue
 			}
+			f.BaseValueSet().AddAddress(addr)
 
 			// Get the bytecode from the chain state
 			code := contract.CompiledContract().RuntimeBytecode
@@ -1517,7 +1525,34 @@ func (f *Fuzzer) prepareAndProcessChainStateInGPU(testChain *chain.TestChain) er
 	cJSON := C.CString(stateJSON)
 	defer C.free(unsafe.Pointer(cJSON))
 
-	result := C.process_json_state_gpu(cJSON, C.uint(f.config.Fuzzing.Workers), false, C.uint(f.skipSequenceSize))
+	// groupConstantsByTypeHex groups slither constants by type and converts values to hex strings as required.
+	groupedConstants := groupConstantsByTypeHex(f.BaseValueSet().Addresses(), f.BaseValueSet().Integers())
+	constantsBytes, err := json.Marshal(groupedConstants)
+	var constantJSON *C.char
+	if err != nil {
+		constantJSON = C.CString("{}") // fallback to empty object if marshal fails
+	} else {
+		constantJSON = C.CString(string(constantsBytes))
+	}
+	f.addressConstants = groupedConstants["address"]
+	f.integerConstants = groupedConstants["integer"]
+
+	// fmt.Println("\n\nCuEVM Debug: constantJSON", string(constantsBytes))
+	// fmt.Println("\n\n")
+
+	fmt.Println("CuEVM Debug: valueset ")
+	addressSet := f.BaseValueSet().Addresses()
+	for _, addr := range addressSet {
+		fmt.Println("CuEVM Debug: address", addr.Hex())
+	}
+	integerSet := f.BaseValueSet().Integers()
+	for _, integer := range integerSet {
+		fmt.Println("CuEVM Debug: integer", hex.EncodeToString(integer.Bytes()))
+	}
+
+	defer C.free(unsafe.Pointer(constantJSON))
+
+	result := C.process_json_state_gpu(cJSON, C.uint(f.config.Fuzzing.Workers), false, C.uint(f.skipSequenceSize), constantJSON)
 
 	// Check the result
 	if result != 0 {
@@ -1615,45 +1650,83 @@ func convertStateToJSON(stateDump *ethstate.Dump, blockHeader *types.Header) str
 	return string(jsonBytes)
 }
 
-func (f *Fuzzer) restore_mutation(data []byte, callDataMarkers []calls.DataMarker, sequenceIdx int, elementIdx int) []byte {
+func (f *Fuzzer) restore_mutation(data []byte, callDataMarkers []calls.DataMarker, sequenceIdx, elementIdx int) []byte {
 	const (
-		a                 = 1664525
-		c                 = 1013904223
-		m                 = 0xFFFFFFFF
-		chanceToCreateNew = 2
+		a                                     = 1664525
+		c                                     = 1013904223
+		m                                     = 0xFFFFFFFF
+		CHANCE_TO_TAKE_INTEGER_FROM_CONSTANTS = 50
+		CHANCE_TO_CREATE_NEW_INTEGER          = 2
+		CHANCE_TO_CREATE_NEW_ADDRESS          = 0
 	)
+
+	// Mutate a byte array in-place, starting at data[0]
+	mutateByteArray := func(data []byte, elementLength, byteLength uint32, seed uint32, createNew bool) uint32 {
+		seed = (a*seed + c) % m
+		mutatedByte := seed % (byteLength + 1)
+		if createNew {
+			seed = (a*seed + c) % m
+			randomChance := seed % 100
+			if randomChance <= CHANCE_TO_TAKE_INTEGER_FROM_CONSTANTS && len(f.integerConstants) > 0 {
+				seed = (a*seed + c) % m
+				randomIndex := seed % uint32(len(f.integerConstants))
+				integerConstant := f.integerConstants[randomIndex]
+				// Decode hex string without "0x" prefix
+				integerConstantBytes, err := hex.DecodeString(integerConstant[2:])
+				// fmt.Printf("CuEVM Debug: integerConstantBytes 0x%s\n", hex.EncodeToString(integerConstantBytes))
+				if err == nil {
+					// Copy bytes directly - they're already properly padded to 32 bytes
+					copy(data[elementLength-byteLength:], integerConstantBytes[elementLength-byteLength:])
+				}
+			} else {
+				for i := 0; i < int(elementLength-mutatedByte); i++ {
+					data[i] = 0
+				}
+			}
+		}
+		start := int(elementLength - mutatedByte)
+		for i := 0; i < int(mutatedByte); i++ {
+			seed = (a*seed + c) % m
+			data[start+i] = byte(seed & 0xFF)
+		}
+		return seed
+	}
+
 	seed := uint32(f.loopCounter) + uint32(elementIdx) + uint32(sequenceIdx) + uint32(sequenceIdx)/uint32(f.numInstancesPerDevice)
-	// fmt.Println("CuEVM Debug: elementIdx", elementIdx, "sequenceIdx", sequenceIdx, "seed", seed)
 	mutated := make([]byte, len(data))
 	copy(mutated, data)
 
 	for _, marker := range callDataMarkers {
-		elementOffset := marker.Offset
+		elementOffset := int(marker.Offset)
 		elementType := marker.Type
-		elementLength := marker.Length
+		elementLength := uint32(marker.Length)
+
+		slice := mutated[elementOffset:] // operate directly on the sub-slice
 
 		if elementType != 0 && elementType != 1 {
-			byteLength := elementType / 8
-			// randomize the marker data
+			byteLength := uint32(elementType) / 8
 			seed = (a*seed + c) % m
-			createNew := (seed % chanceToCreateNew) == 1
+			createNew := (seed % CHANCE_TO_CREATE_NEW_INTEGER) == 0
+			seed = mutateByteArray(slice, elementLength, byteLength, seed, createNew)
+		} else if elementType == 1 { // address
 			seed = (a*seed + c) % m
-			mutatedByte := seed % uint32(byteLength+1)
-			if createNew {
-				// clear call data before mutated byte
-				for i := 0; i < int(elementLength)-int(mutatedByte); i++ {
-					if int(elementOffset)+i < len(mutated) {
-						mutated[int(elementOffset)+i] = 0
-					}
-				}
-			}
-			startOffset := int(elementOffset) + int(elementLength) - int(mutatedByte)
-			for mutateByteIndex := 0; mutateByteIndex < int(mutatedByte); mutateByteIndex++ {
+			randomChance := seed % 100
+			if randomChance <= CHANCE_TO_CREATE_NEW_ADDRESS {
+				// mutate the address (32 bytes, only last 20 used)
+				seed = mutateByteArray(slice, 32, 20, seed, true)
+			} else {
 				seed = (a*seed + c) % m
-				randomByte := byte(seed & 0xFF)
-				pos := startOffset + mutateByteIndex
-				if pos < len(mutated) {
-					mutated[pos] = randomByte
+				// fmt.Println("CuEVM Debug: seed, len(f.addressConstants)", seed, len(f.addressConstants))
+				// fmt.Println("CuEVM Debug: f.addressConstants", f.addressConstants)
+				if len(f.addressConstants) > 0 {
+					randomIndex := seed % uint32(len(f.addressConstants))
+					// fmt.Println("CuEVM Debug: randomIndex", randomIndex)
+					addressConstant := f.addressConstants[randomIndex]
+					addressConstantBytes, err := hex.DecodeString(addressConstant[2:]) // remove 0x prefix
+					if err == nil {
+						// Copy the address bytes (last 20 of 32 bytes)
+						copy(slice[12:32], addressConstantBytes)
+					}
 				}
 			}
 		}
@@ -1688,11 +1761,16 @@ func (f *Fuzzer) launchGPUKernel() error {
 	// 	fmt.Println(strings.Join(txDataList, ","))
 	// }
 
-	for i := 0; i < len(f.workers); i++ {
-		for j := 0; j < len(f.workers[i].callSequenceElements); j++ {
-			fmt.Println("CuEVM Debug: worker", i, "sequence", j, "element", f.workers[i].callSequenceElements[j])
-		}
-	}
+	// for i := 0; i < len(f.workers); i++ {
+	// 	for j := 0; j < len(f.workers[i].callSequenceElements); j++ {
+
+	// 		// if (j % f.skipSequenceSize) == 0 {
+	// 		for k := 0; k < len(f.workers[i].callSequenceElements[j]); k++ {
+	// 			fmt.Println("CuEVM Debug: worker", i, "sequence", j, "element", k, "call", f.workers[i].callSequenceElements[j][k])
+	// 		}
+	// 		// }
+	// 	}
+	// }
 
 	// Process state data from our base test chain for GPU processing
 	if len(f.workers) > 0 && f.workers[0] != nil && f.workers[0].chain != nil {
@@ -1702,13 +1780,14 @@ func (f *Fuzzer) launchGPUKernel() error {
 		}
 	}
 	// CuEVM May version, send back the idx in all sequence elements for seed update.
+
 	gpuResults, err := f.runTransactionsGPU(f.workers)
-	fmt.Println("CuEVM Debug: gpuResults", gpuResults.DebugString(), "err", err)
+	// fmt.Println("CuEVM Debug: gpuResults", gpuResults.DebugString(), "err", err)
 
 	if err == nil {
 		bigIntWeightValue := big.NewInt(int64((f.loopCounter + 1) * f.sequencesPerCPUWorker * f.numCPUWorkers / 10))
 		f.assertion_test_provider.GPUPostCallTest(f.workers, gpuResults, bigIntWeightValue)
-		// f.corpus.CheckGPUCoverageAndUpdate(gpuResults, f.contractAddressToCodeHash, f.workers, loopCounter, true)
+
 		// add all call sequences to corpus
 		for batchIdx := 0; batchIdx < len(gpuResults.NewCoverageIndices); batchIdx++ {
 			for idx := 0; idx < len(gpuResults.NewCoverageIndices[batchIdx]); idx++ {
@@ -1720,25 +1799,30 @@ func (f *Fuzzer) launchGPUKernel() error {
 				// Create a sequence from element 0 to elementIdx
 				fullSequence := make(calls.CallSequence, elementIdx+1)
 				for i := 0; i <= elementIdx; i++ {
-					fullSequence[i] = f.workers[workerIdx].callSequenceElements[sequenceIdx][i]
-					dataMarkers := f.workers[workerIdx].callSequenceElements[(sequenceIdx/f.skipSequenceSize)*f.skipSequenceSize][i].Call.DataMarkers
 
-					// fmt.Println("CuEVM Debug: dataMarkers", dataMarkers)
-					// fmt.Println("CuEVM Debug: idx", idx, "fullSequence[", i, "]")
+					fullSequence[i], _ = f.workers[workerIdx].callSequenceElements[sequenceIdx][i].Clone()
+
+					// if sequenceIdx%f.skipSequenceSize == 0 {
+					// 	continue
+					// }
+					// debug disable mutaiton
+
+					dataMarkers := f.workers[workerIdx].callSequenceElements[(sequenceIdx/f.skipSequenceSize)*f.skipSequenceSize][i].Call.DataMarkers
 
 					mutatedData := f.restore_mutation(fullSequence[i].Call.Data, dataMarkers, rawIdx, i)
 					inputData := mutatedData[4:] // skip the method ID
 					inputValues, err := fullSequence[i].Call.DataAbiValues.Method.Inputs.Unpack(inputData)
 					if err != nil {
+						fmt.Println("\n\nCuEVM Debug: unpack error\n\n", err)
 						// handle error
 					}
-					fmt.Println("CuEVM debug original data ", hex.EncodeToString(fullSequence[i].Call.Data))
+					// fmt.Println("CuEVM debug original data ", hex.EncodeToString(fullSequence[i].Call.Data))
 					fullSequence[i].Call.DataAbiValues.InputValues = inputValues
 					fullSequence[i].Call.Data = mutatedData
-					fmt.Println("CuEVM debug mutated data ", hex.EncodeToString(mutatedData))
-					fmt.Println("CuEVM debug new inputValues", inputValues)
+					// fmt.Println("CuEVM debug mutated data ", hex.EncodeToString(mutatedData))
+					// fmt.Println("CuEVM debug new inputValues", inputValues)
 
-					fmt.Println("Call element", fullSequence[i])
+					// fmt.Println("CuEVM Debug: Call element", fullSequence[i])
 				}
 				// fmt.Println("CuEVM Debug: GPU adding sequence to corpus bigIntWeightValue", bigIntWeightValue)
 				// fmt.Println("CuEVM Debug: fullSequence", fullSequence)
@@ -1982,6 +2066,10 @@ func (f *Fuzzer) RunAllSequences() {
 					f.logger.Error("Failed to revert chain to base state", err)
 					continue
 				}
+				fmt.Println("CuEVM Debug: sequence")
+				for k := 0; k < len(sequence); k++ {
+					fmt.Println("CuEVM Debug: sequence[", k, "]", sequence[k])
+				}
 
 				_, worker.lastExecutionError = calls.SimulateExecuteCallSequenceGPUWithList(
 					worker.chain,
@@ -2012,15 +2100,20 @@ func (f *Fuzzer) Start() error {
 	f.randomProvider = rand.New(rand.NewSource(1))
 
 	// CuEVM Debug: fixed number of CPU workers
-	f.numCPUWorkers = 1 // 2 * runtime.NumCPU()
+	f.numCPUWorkers = runtime.NumCPU()
 	f.GPUchainInitiated = false
-	// Round up the total workers to be a multiple of numCPUWorkers
-	f.config.Fuzzing.Workers = ((f.config.Fuzzing.Workers + f.numCPUWorkers - 1) / f.numCPUWorkers) * f.numCPUWorkers
+	rawSequencesPerWorker := f.config.Fuzzing.Workers / f.numCPUWorkers
 
-	// Calculate how many sequences each CPU worker will process
+	// Round up to next multiple of skipSequenceSize
+	roundedSequencesPerWorker := ((rawSequencesPerWorker + f.skipSequenceSize - 1) / f.skipSequenceSize) * f.skipSequenceSize
+
+	// Update total workers to ensure proper division
+	f.config.Fuzzing.Workers = roundedSequencesPerWorker * f.numCPUWorkers
+
+	// Now this will be divisible by skipSequenceSize
 	f.sequencesPerCPUWorker = f.config.Fuzzing.Workers / f.numCPUWorkers
-	fmt.Println("CuEVM Debug: f.sequencesPerCPUWorker", f.sequencesPerCPUWorker, "f.config.Fuzzing.Workers", f.config.Fuzzing.Workers, "f.numCPUWorkers", f.numCPUWorkers)
 
+	fmt.Println("CuEVM Debug: f.sequencesPerCPUWorker", f.sequencesPerCPUWorker, "f.config.Fuzzing.Workers", f.config.Fuzzing.Workers, "f.numCPUWorkers", f.numCPUWorkers)
 	// Create our main and emergency running context (allows us to cancel across threads)
 	f.ctx, f.ctxCancelFunc = context.WithCancel(context.Background())
 	f.emergencyCtx, f.emergencyCtxCancelFunc = context.WithCancel(context.Background())
@@ -2378,4 +2471,32 @@ func (f *Fuzzer) printExitingResults() {
 
 	// Print our final tally of test statuses.
 	f.logger.Info("Test summary: ", colors.GreenBold, testCountPassed, colors.Reset, " test(s) passed, ", colors.RedBold, testCountFailed, colors.Reset, " test(s) failed")
+}
+
+// groupConstantsByTypeHex groups slither constants by type and converts values to hex strings as required.
+func groupConstantsByTypeHex(addresses []common.Address, integers []*big.Int) map[string][]string {
+	result := make(map[string][]string)
+	seen_address := make(map[string]bool) // set of seen values
+	seen_integer := make(map[string]bool) // set of seen values
+	// precompute 2^256
+	two256 := new(big.Int).Lsh(big.NewInt(1), 256)
+
+	for _, c := range addresses {
+		if _, exists := seen_address[c.Hex()]; !exists {
+			result["address"] = append(result["address"], c.Hex())
+			seen_address[c.Hex()] = true
+		}
+	}
+	for _, c := range integers {
+		cMod := new(big.Int).Mod(c, two256)
+		b := make([]byte, 32)
+		cMod.FillBytes(b)
+		hexStr := "0x" + hex.EncodeToString(b)
+		if !seen_integer[hexStr] {
+			result["integer"] = append(result["integer"], hexStr)
+			seen_integer[hexStr] = true
+		}
+		fmt.Println("DEBUG: input integer:", hexStr)
+	}
+	return result
 }

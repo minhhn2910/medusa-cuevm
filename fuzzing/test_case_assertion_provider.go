@@ -272,7 +272,7 @@ func (t *AssertionTestCaseProvider) GPUPostCallTest(workers []*FuzzerWorker, gpu
 			elementIdx := batchIdx
 			fullSequence := make(calls.CallSequence, elementIdx+1)
 			for i := 0; i <= elementIdx; i++ {
-				fullSequence[i] = workers[workerIdx].callSequenceElements[sequenceIdx][i]
+				fullSequence[i], _ = workers[workerIdx].callSequenceElements[sequenceIdx][i].Clone()
 				dataMarkers := workers[workerIdx].callSequenceElements[(sequenceIdx/skipSequenceSize)*skipSequenceSize][i].Call.DataMarkers
 
 				// fmt.Println("CuEVM Debug: dataMarkers", dataMarkers)
@@ -352,6 +352,7 @@ func (t *AssertionTestCaseProvider) GPUPostCallTest(workers []*FuzzerWorker, gpu
 		}
 	}
 
+	// CuEVM: disable shrink requests for debugging June 19
 	for workerIdx := 0; workerIdx < len(workers); workerIdx++ {
 		worker := workers[workerIdx]
 		if len(newShrinkRequests[workerIdx]) > 0 {

@@ -167,106 +167,111 @@ func (d *CallMessageDataAbiValues) packWithMask(arguments abi.Arguments, args []
 		return nil, nil, err
 	}
 	var markers []DataMarker
-	// The head section starts at offset 0
+
+	// We need to walk the packed data structure to find where actual values are stored
+	// The ABI encoding has a head section with static types and offsets to dynamic types
+	// Dynamic types are stored in a tail section after the head
+
 	headOffset := 0
-	// The tail section starts after the head
-	tailOffset := len(arguments) * 32
-	// We need to keep track of the current tail offset as we process dynamic types
-	tailCursor := tailOffset
+	tailOffset := len(arguments) * 32 // Tail starts after head (32 bytes per argument)
+	currentTailOffset := tailOffset
 
 	// Helper to recursively walk types/values and collect markers
-	var walk func(typ abi.Type, value interface{}, offset int) error
-	walk = func(typ abi.Type, value interface{}, offset int) error {
+	var walkType func(typ abi.Type, value interface{}, offset int) (int, error)
+	walkType = func(typ abi.Type, value interface{}, offset int) (int, error) {
 		switch typ.T {
 		case abi.IntTy, abi.UintTy:
+			// Mark integer types
 			markers = append(markers, DataMarker{
 				Offset: offset,
 				Type:   DataType(typ.Size),
 				Length: 32,
 			})
+			return 32, nil
 		case abi.AddressTy:
+			// Mark address types
 			markers = append(markers, DataMarker{
 				Offset: offset,
 				Type:   DataTypeAddress,
 				Length: 32,
 			})
+			return 32, nil
 		case abi.ArrayTy, abi.SliceTy:
-			// Dynamic arrays: value is a slice, static arrays: value is an array
-			var arrLen int
-			var elems []interface{}
 			v := reflect.ValueOf(value)
-			arrLen = v.Len()
-			for i := 0; i < arrLen; i++ {
-				elems = append(elems, v.Index(i).Interface())
-			}
+			arrLen := v.Len()
+
 			if typ.T == abi.ArrayTy && !isDynamicType(typ) {
-				// Static array: elements are in-place
-				eleOffset := offset
+				// Static array: elements are stored in-place in the head
+				currentOffset := offset
 				for i := 0; i < arrLen; i++ {
-					if err := walk(*typ.Elem, elems[i], eleOffset); err != nil {
-						return err
+					elem := v.Index(i).Interface()
+					size, err := walkType(*typ.Elem, elem, currentOffset)
+					if err != nil {
+						return 0, err
 					}
-					eleOffset += getTypeSize(*typ.Elem)
+					currentOffset += size
 				}
+				return getTypeSize(typ), nil
 			} else {
-				// Dynamic array: offset points to tail, tail starts with length (32 bytes)
-				// The offset in the head points to the start of the array data in the tail
-				// The array data in the tail: [length (32 bytes)] [element 0] [element 1] ...
-				// The offset argument is the offset in the head (where the 32-byte offset is stored)
-				// We need to calculate the actual offset in the packed data for each element
-				// The tailCursor points to the start of this array's data
-				arrayDataOffset := tailCursor
-				tailCursor += 32 + arrLen*32 // 32 for length, 32 per element (assume element is 32 bytes)
+				// Dynamic array: stored in tail section
+				// Head contains offset pointer (which we DON'T mark)
+				// Tail contains: [length (32 bytes)] [element 0] [element 1] ...
+				// We only mark the array elements, not the length or offset
+
+				currentTailOffset += 32 // Skip the length field (don't mark it)
+
+				// Mark each array element
 				for i := 0; i < arrLen; i++ {
-					eleOffset := arrayDataOffset + 32 + i*32
-					if err := walk(*typ.Elem, elems[i], eleOffset); err != nil {
-						return err
+					elem := v.Index(i).Interface()
+					size, err := walkType(*typ.Elem, elem, currentTailOffset)
+					if err != nil {
+						return 0, err
 					}
+					currentTailOffset += size
 				}
+				return 32, nil // Head contains 32-byte offset
 			}
 		case abi.TupleTy:
-			// Tuple: value is a struct or tuple, walk each field
+			// Tuple/struct: walk each field
 			v := reflect.ValueOf(value)
-			fieldOffset := offset
+			currentOffset := offset
 			for i, elemType := range typ.TupleElems {
 				fieldValue := v.Field(i).Interface()
-				if err := walk(*elemType, fieldValue, fieldOffset); err != nil {
-					return err
+				size, err := walkType(*elemType, fieldValue, currentOffset)
+				if err != nil {
+					return 0, err
 				}
-				fieldOffset += getTypeSize(*elemType)
+				currentOffset += size
 			}
+			return getTypeSize(typ), nil
+		default:
+			// Other types (string, bytes, etc.) - don't mark them
+			return getTypeSize(typ), nil
 		}
-		return nil
 	}
 
-	// Walk each argument in the head
+	// Process each argument
 	for i, arg := range arguments {
 		t := arg.Type
 		value := args[i]
+
 		if isDynamicType(t) {
-			// For dynamic types, the head contains a 32-byte offset to the tail
-			// The actual data is in the tail, which we track with tailCursor
-			// We'll process the tail after the head
-			continue
-		}
-		if err := walk(t, value, headOffset); err != nil {
-			return nil, nil, err
-		}
-		headOffset += getTypeSize(t)
-	}
-	// Now process dynamic types in the tail
-	headOffset = 0
-	for i, arg := range arguments {
-		t := arg.Type
-		value := args[i]
-		if isDynamicType(t) {
-			if err := walk(t, value, tailOffset); err != nil {
+			// Dynamic type: head contains offset (don't mark), actual data is in tail
+			_, err := walkType(t, value, 0) // offset will be calculated in walkType
+			if err != nil {
 				return nil, nil, err
 			}
-			tailOffset += getTypeSize(t)
+			headOffset += 32 // Head contains 32-byte offset
+		} else {
+			// Static type: stored directly in head
+			_, err := walkType(t, value, headOffset)
+			if err != nil {
+				return nil, nil, err
+			}
+			headOffset += getTypeSize(t)
 		}
-		headOffset += getTypeSize(t)
 	}
+
 	return argData, markers, nil
 }
 
