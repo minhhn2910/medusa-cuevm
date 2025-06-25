@@ -3,7 +3,7 @@ package calls
 import (
 	"encoding/json"
 	"fmt"
-	"reflect"
+	"math/big"
 
 	"github.com/crytic/medusa-geth/accounts/abi"
 	"github.com/crytic/medusa-geth/common"
@@ -148,131 +148,124 @@ func (d *CallMessageDataAbiValues) PackWithMask() ([]byte, []DataMarker, error) 
 	if len(d.Method.Inputs) != len(d.InputValues) {
 		return nil, nil, fmt.Errorf("ABI call data packing failed, method definition describes %d input arguments, but %d were provided", len(d.Method.Inputs), len(d.InputValues))
 	}
-	argData, markers, err := d.packWithMask(d.Method.Inputs, d.InputValues)
-	if err != nil {
-		return nil, nil, fmt.Errorf("ABI call data packing encountered error: %v", err)
+
+	// This function is a reimplementation of abi.Arguments.Pack, with marker generation added.
+	// It works in two passes:
+	// 1. Pack all arguments into a single byte slice (`argData`), correctly handling head/tail placement.
+	// 2. Walk the type structure and read offsets from the generated `argData` to create markers.
+
+	var head, tail []byte
+	var markers []DataMarker
+
+	abiArgs := d.Method.Inputs
+	args := d.InputValues
+
+	// --- Pass 1: Pack arguments and build argData ---
+
+	initialTailOffset := 0
+	for _, arg := range abiArgs {
+		initialTailOffset += getTypeSize(arg.Type)
 	}
-	callData := append(append([]byte{}, d.Method.ID...), argData...)
-	// Adjust marker offsets by 4 (method ID length)
+
+	// packSingleArg packs one argument. For dynamic types, it returns just the tail data,
+	// stripping the 32-byte offset prefix that `abi.Arguments.Pack` adds for a single arg.
+	packSingleArg := func(arg abi.Argument, value interface{}) ([]byte, error) {
+		packed, err := abi.Arguments{arg}.Pack(value)
+		if err != nil {
+			return nil, err
+		}
+		if isDynamicType(arg.Type) {
+			return packed[32:], nil
+		}
+		return packed, nil
+	}
+
+	packedTails := make([][]byte, len(abiArgs))
+	currentTailOffset := initialTailOffset
+	for i, arg := range abiArgs {
+		packed, err := packSingleArg(arg, args[i])
+		if err != nil {
+			return nil, nil, err
+		}
+
+		if isDynamicType(arg.Type) {
+			head = append(head, common.LeftPadBytes(big.NewInt(int64(currentTailOffset)).Bytes(), 32)...)
+			packedTails[i] = packed // Defer append to tail
+			currentTailOffset += len(packed)
+		} else {
+			head = append(head, packed...)
+		}
+	}
+
+	for _, packed := range packedTails {
+		if packed != nil {
+			tail = append(tail, packed...)
+		}
+	}
+	argData := append(head, tail...)
+
+	// --- Pass 2: Generate markers using the final argData ---
+
+	var walkAndMark func(typ abi.Type, offset int)
+	walkAndMark = func(typ abi.Type, offset int) {
+		switch typ.T {
+		case abi.IntTy, abi.UintTy:
+			markers = append(markers, DataMarker{Offset: offset, Type: DataType(typ.Size), Length: 32})
+		case abi.AddressTy:
+			markers = append(markers, DataMarker{Offset: offset, Type: DataTypeAddress, Length: 32})
+		case abi.TupleTy:
+			elemOffset := 0
+			for _, elemTyp := range typ.TupleElems {
+				fieldOffset := offset + elemOffset
+				if isDynamicType(*elemTyp) {
+					dynamicElemOffset := int(common.BytesToHash(argData[fieldOffset : fieldOffset+32]).Big().Int64())
+					walkAndMark(*elemTyp, offset+dynamicElemOffset)
+					elemOffset += 32
+				} else {
+					walkAndMark(*elemTyp, fieldOffset)
+					elemOffset += getTypeSize(*elemTyp)
+				}
+			}
+		case abi.SliceTy: // Dynamic Array
+			length := int(common.BytesToHash(argData[offset : offset+32]).Big().Int64())
+			elemDataStart := offset + 32
+			elemSize := getTypeSize(*typ.Elem)
+			for i := 0; i < length; i++ {
+				elemPos := elemDataStart + (i * elemSize)
+				if isDynamicType(*typ.Elem) {
+					dynamicElemOffset := int(common.BytesToHash(argData[elemPos : elemPos+32]).Big().Int64())
+					walkAndMark(*typ.Elem, offset+dynamicElemOffset)
+				} else {
+					walkAndMark(*typ.Elem, elemPos)
+				}
+			}
+		case abi.ArrayTy: // Static Array
+			elemSize := getTypeSize(*typ.Elem)
+			for i := 0; i < typ.Size; i++ {
+				walkAndMark(*typ.Elem, offset+(i*elemSize))
+			}
+		}
+	}
+
+	headReadOffset := 0
+	for _, arg := range abiArgs {
+		if isDynamicType(arg.Type) {
+			dynamicOffset := int(common.BytesToHash(argData[headReadOffset : headReadOffset+32]).Big().Int64())
+			walkAndMark(arg.Type, dynamicOffset)
+			headReadOffset += 32
+		} else {
+			walkAndMark(arg.Type, headReadOffset)
+			headReadOffset += getTypeSize(arg.Type)
+		}
+	}
+
+	// Adjust all marker offsets by 4 bytes for the method ID.
 	for i := range markers {
 		markers[i].Offset += 4
 	}
-	return callData, markers, nil
-}
 
-// packWithMask returns the packed data and a slice of DataMarker for int/uint/address arguments, including those in arrays and tuples.
-func (d *CallMessageDataAbiValues) packWithMask(arguments abi.Arguments, args []interface{}) ([]byte, []DataMarker, error) {
-	argData, err := arguments.Pack(args...)
-	if err != nil {
-		return nil, nil, err
-	}
-	var markers []DataMarker
-
-	// We need to walk the packed data structure to find where actual values are stored
-	// The ABI encoding has a head section with static types and offsets to dynamic types
-	// Dynamic types are stored in a tail section after the head
-
-	headOffset := 0
-	tailOffset := len(arguments) * 32 // Tail starts after head (32 bytes per argument)
-	currentTailOffset := tailOffset
-
-	// Helper to recursively walk types/values and collect markers
-	var walkType func(typ abi.Type, value interface{}, offset int) (int, error)
-	walkType = func(typ abi.Type, value interface{}, offset int) (int, error) {
-		switch typ.T {
-		case abi.IntTy, abi.UintTy:
-			// Mark integer types
-			markers = append(markers, DataMarker{
-				Offset: offset,
-				Type:   DataType(typ.Size),
-				Length: 32,
-			})
-			return 32, nil
-		case abi.AddressTy:
-			// Mark address types
-			markers = append(markers, DataMarker{
-				Offset: offset,
-				Type:   DataTypeAddress,
-				Length: 32,
-			})
-			return 32, nil
-		case abi.ArrayTy, abi.SliceTy:
-			v := reflect.ValueOf(value)
-			arrLen := v.Len()
-
-			if typ.T == abi.ArrayTy && !isDynamicType(typ) {
-				// Static array: elements are stored in-place in the head
-				currentOffset := offset
-				for i := 0; i < arrLen; i++ {
-					elem := v.Index(i).Interface()
-					size, err := walkType(*typ.Elem, elem, currentOffset)
-					if err != nil {
-						return 0, err
-					}
-					currentOffset += size
-				}
-				return getTypeSize(typ), nil
-			} else {
-				// Dynamic array: stored in tail section
-				// Head contains offset pointer (which we DON'T mark)
-				// Tail contains: [length (32 bytes)] [element 0] [element 1] ...
-				// We only mark the array elements, not the length or offset
-
-				currentTailOffset += 32 // Skip the length field (don't mark it)
-
-				// Mark each array element
-				for i := 0; i < arrLen; i++ {
-					elem := v.Index(i).Interface()
-					size, err := walkType(*typ.Elem, elem, currentTailOffset)
-					if err != nil {
-						return 0, err
-					}
-					currentTailOffset += size
-				}
-				return 32, nil // Head contains 32-byte offset
-			}
-		case abi.TupleTy:
-			// Tuple/struct: walk each field
-			v := reflect.ValueOf(value)
-			currentOffset := offset
-			for i, elemType := range typ.TupleElems {
-				fieldValue := v.Field(i).Interface()
-				size, err := walkType(*elemType, fieldValue, currentOffset)
-				if err != nil {
-					return 0, err
-				}
-				currentOffset += size
-			}
-			return getTypeSize(typ), nil
-		default:
-			// Other types (string, bytes, etc.) - don't mark them
-			return getTypeSize(typ), nil
-		}
-	}
-
-	// Process each argument
-	for i, arg := range arguments {
-		t := arg.Type
-		value := args[i]
-
-		if isDynamicType(t) {
-			// Dynamic type: head contains offset (don't mark), actual data is in tail
-			_, err := walkType(t, value, 0) // offset will be calculated in walkType
-			if err != nil {
-				return nil, nil, err
-			}
-			headOffset += 32 // Head contains 32-byte offset
-		} else {
-			// Static type: stored directly in head
-			_, err := walkType(t, value, headOffset)
-			if err != nil {
-				return nil, nil, err
-			}
-			headOffset += getTypeSize(t)
-		}
-	}
-
-	return argData, markers, nil
+	finalCallData := append(d.Method.ID, argData...)
+	return finalCallData, markers, nil
 }
 
 // MarshalJSON provides custom JSON marshalling for the struct.

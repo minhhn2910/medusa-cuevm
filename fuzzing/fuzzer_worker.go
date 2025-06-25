@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math/big"
 	"math/rand"
+	"sort"
 	"sync"
 
 	"github.com/crytic/medusa/logging/colors"
@@ -92,6 +93,11 @@ type FuzzerWorker struct {
 
 	// callSequenceElements []*calls.CallSequenceElement
 	callSequenceElements [][]*calls.CallSequenceElement
+
+	// CuEVM, cache sequence element for each static ABI method
+	staticABICallElementCache  map[string][]byte
+	staticABIDataABIValues     map[string]calls.CallMessageDataAbiValues
+	staticABIMarkerOffsetCache map[string]int
 }
 
 // newFuzzerWorker creates a new FuzzerWorker, assigning it the provided worker index/id and associating it to the
@@ -122,6 +128,9 @@ func newFuzzerWorker(fuzzer *Fuzzer, workerIndex int, randomProvider *rand.Rand)
 		pureMethods:                make([]fuzzerTypes.DeployedContractMethod, 0),
 		shrinkCallSequenceRequests: make([]ShrinkCallSequenceRequest, 0),
 		coverageTracer:             nil,
+		staticABICallElementCache:  make(map[string][]byte),
+		staticABIMarkerOffsetCache: make(map[string]int),
+		staticABIDataABIValues:     make(map[string]calls.CallMessageDataAbiValues),
 		randomProvider:             randomProvider,
 		valueSet:                   valueSet,
 	}
@@ -300,6 +309,16 @@ func (fw *FuzzerWorker) updateMethods() {
 			}
 		}
 	}
+
+	// CuEVM Debug: sort methods by name for deterministic order
+	// Sort both arrays by method name for deterministic order
+	sort.Slice(fw.pureMethods, func(i, j int) bool {
+		return fw.pureMethods[i].Method.Name < fw.pureMethods[j].Method.Name
+	})
+
+	sort.Slice(fw.stateChangingMethods, func(i, j int) bool {
+		return fw.stateChangingMethods[i].Method.Name < fw.stateChangingMethods[j].Method.Name
+	})
 }
 
 // testNextCallSequence tests a call message sequence against the underlying FuzzerWorker's Chain and calls every

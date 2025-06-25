@@ -116,13 +116,14 @@ typedef struct {
 SimplifiedGPUResultC* process_batch_transactions(const uint64_t* blockNumber, const uint64_t* timeStamp, const unsigned char* fromAddr, const unsigned char* toAddr,
                                                  const unsigned char* values, const unsigned char* callData,
                                                  uint32_t callDataLen, const uint32_t* dataOffsets,
-                                                 const uint32_t* dataSizes, const uint32_t* markerOffsets,
-												 const uint32_t* markerCounts, const uint32_t* markerData,
+                                                 const uint32_t* dataSizes, const int32_t* markerOffsets,
+												 const uint32_t* markerData,
 												 uint32_t markerDataLen, uint32_t txBatchCount, uint32_t sequenceLength, uint32_t start_seed);
 
 // Updated function declaration with reset_state parameter
 // int process_json_state_gpu(const char* json_state, uint32_t num_instances, bool reset_state);
-int process_json_state_gpu(const char* json_state, uint32_t num_instances, bool reset_state, uint32_t skipTxSize, const char* constants);
+int process_json_state_gpu(const char* json_state, uint32_t num_instances, bool reset_state, uint32_t skipTxSize, const char* constants,
+							const uint32_t* markerData, uint32_t markerDataLen);
 
 uint32_t get_num_instances_per_device();
 
@@ -216,8 +217,16 @@ type Fuzzer struct {
 	numInstancesPerDevice int
 	loopCounter           int
 	// CuEVM debug: skip sequence size
-	skipSequenceSize int
-	originalNonceMap map[common.Address]uint64
+	skipSequenceSize          int
+	originalNonceMap          map[common.Address]uint64
+	signatureDynamicEncoding  []string             // all the methods with dynamic encoding
+	staticABIMarkers          [][]calls.DataMarker // markers of all the methods w/o dynamic encoding
+	staticABISignature        []string             // not safe to modified by multiple threads
+	staticABIMarkerIndexMap   map[string]int       // mapping of signature to offset in the flattened markers
+	staticABICallData         [][]byte             // not safe to modified by multiple threads
+	staticABIDataABIValues    []calls.CallMessageDataAbiValues
+	staticABIFlattenedMarkers []uint32 // flattened markers of all the methods w/o dynamic encoding
+	staticABIMarkerOffset     []uint32 // mapping of signature to offset in the flattened markers
 	// CuEVM debug: shrink workers
 	shrinkWorkers []*FuzzerWorker
 
@@ -351,6 +360,7 @@ func NewFuzzer(config config.ProjectConfig) (*Fuzzer, error) {
 	}
 	// CuEVM Debug: constant skip sequence size
 	fuzzer.skipSequenceSize = 16
+	fuzzer.staticABIMarkerIndexMap = make(map[string]int)
 	return fuzzer, nil
 }
 
@@ -747,7 +757,7 @@ func chainSetupFromCompilations(fuzzer *Fuzzer, testChain *chain.TestChain) (*ex
 func getDefaultRandomValueGeneratorConfig() *valuegeneration.RandomValueGeneratorConfig {
 	return &valuegeneration.RandomValueGeneratorConfig{
 		GenerateRandomArrayMinSize:  0,
-		GenerateRandomArrayMaxSize:  16,
+		GenerateRandomArrayMaxSize:  8, // CuEVM debug
 		GenerateRandomBytesMinSize:  0,
 		GenerateRandomBytesMaxSize:  64,
 		GenerateRandomStringMinSize: 0,
@@ -834,6 +844,56 @@ func (f *Fuzzer) spawnWorkersLoop(baseTestChain *chain.TestChain) error {
 			return err
 		}
 
+		// Setup chain if this is the first run
+		if worker.chain == nil {
+			// fmt.Println("worker.chain is nil, setting up worker chain")
+			var err error
+			worker.chain, err = baseTestChain.Clone(func(initializedChain *chain.TestChain) error {
+				// Subscribe our chain event handlers
+				initializedChain.Events.ContractDeploymentAddedEventEmitter.Subscribe(worker.onChainContractDeploymentAddedEvent)
+				initializedChain.Events.ContractDeploymentRemovedEventEmitter.Subscribe(worker.onChainContractDeploymentRemovedEvent)
+
+				// If we have coverage-guided fuzzing enabled, create a tracer to collect coverage and connect it to the chain
+				if f.config.Fuzzing.CoverageEnabled {
+					worker.coverageTracer = coverage.NewCoverageTracer()
+					initializedChain.AddTracer(worker.coverageTracer.NativeTracer(), true, false)
+				}
+
+				// Copy the labels from the base chain to the worker's chain
+				initializedChain.Labels = maps.Clone(baseTestChain.Labels)
+
+				// Emit an event indicating the worker has created its chain
+				err := worker.Events.FuzzerWorkerChainCreated.Publish(FuzzerWorkerChainCreatedEvent{
+					Worker: worker,
+					Chain:  initializedChain,
+				})
+				// fmt.Println("error in fuzzer worker chain created clone", err)
+				return err
+			})
+
+			if err != nil {
+				// errChan <- err
+				return err
+			}
+
+			// Emit an event indicating the worker has set up its chain
+			err = worker.Events.FuzzerWorkerChainSetup.Publish(FuzzerWorkerChainSetupEvent{
+				Worker: worker,
+				Chain:  worker.chain,
+			})
+			if err != nil {
+				// errChan <- fmt.Errorf("error returned by an event handler: %v", err)
+				return err
+			}
+
+			// Increase our generation metric
+			worker.workerMetrics().workerStartupCount.Add(worker.workerMetrics().workerStartupCount, big.NewInt(1))
+
+			// Save the current block index as all contracts have been deployed at this point
+			worker.testingBaseBlockIndex = uint64(len(worker.chain.CommittedBlocks()))
+
+		}
+
 	}
 
 	// CuEVM debug: shrink workers
@@ -874,11 +934,25 @@ func (f *Fuzzer) spawnWorkersLoop(baseTestChain *chain.TestChain) error {
 
 	f.loopCounter = 0
 	f.PrepareNonce(baseTestChain)
+	// make sure chain is initialized before this step
+	f.workers[0].sequenceGenerator.seedSequenceElementCache()
+	// print out the cache
+	fmt.Println("CuEVM Debug: signatureDynamicEncoding", f.signatureDynamicEncoding)
+	for i := 0; i < len(f.staticABICallData); i++ {
+
+		fmt.Println("CuEVM Debug: staticABICallData", hex.EncodeToString(f.staticABICallData[i]))
+		fmt.Println("CuEVM Debug: staticABISignature", f.staticABISignature[i])
+		fmt.Println("CuEVM Debug: staticABIMarkers", f.staticABIMarkers[i])
+		fmt.Println("CuEVM Debug: staticABIMarkerIndexMap", f.staticABIMarkerIndexMap[f.staticABISignature[i]])
+	}
+
+	// TODO: clone to other workers
+
 	// Main processing loop
 	working := true
 	for working && !utils.CheckContextDone(f.ctx) {
 		// Step 1: Prepare data in parallel
-		workersCancelled, err := f.prepareWorkersDataInParallel(baseTestChain)
+		workersCancelled, err := f.prepareWorkersDataInParallel()
 		if err != nil {
 			fmt.Println("CuEVM Debug: prepareWorkersDataInParallel error", err)
 			return err
@@ -904,7 +978,7 @@ func (f *Fuzzer) spawnWorkersLoop(baseTestChain *chain.TestChain) error {
 		}
 
 		f.loopCounter++
-		// if f.loopCounter == 1 {
+		// if f.loopCounter == 5 {
 		// 	working = false
 		// }
 		// CuEVM Debug
@@ -936,7 +1010,7 @@ func (f *Fuzzer) PrepareNonce(baseTestChain *chain.TestChain) {
 
 // prepareWorkersDataInParallel handles all setup logic from run() in parallel
 // Returns a boolean indicating if workers should be cancelled and an error if one occurred
-func (f *Fuzzer) prepareWorkersDataInParallel(baseTestChain *chain.TestChain) (bool, error) {
+func (f *Fuzzer) prepareWorkersDataInParallel() (bool, error) {
 	var wg sync.WaitGroup
 	errChan := make(chan error, f.numCPUWorkers)
 	cancelChan := make(chan bool, f.numCPUWorkers)
@@ -972,6 +1046,28 @@ func (f *Fuzzer) prepareWorkersDataInParallel(baseTestChain *chain.TestChain) (b
 				}
 			}
 
+			if f.loopCounter == 0 {
+				// construct staticABICallElementCache from fuzzer arrays
+				fmt.Println("CuEVM Debug: constructing staticABICallElementCache")
+
+				for i := 0; i < len(f.staticABICallData); i++ {
+					clonedData := make([]byte, len(f.staticABICallData[i]))
+					copy(clonedData, f.staticABICallData[i])
+					worker.staticABICallElementCache[f.staticABISignature[i]] = clonedData
+					worker.staticABIMarkerOffsetCache[f.staticABISignature[i]] = int(f.staticABIMarkerOffset[i])
+					if clonedVal, err := f.staticABIDataABIValues[i].Clone(); err == nil && clonedVal != nil {
+						worker.staticABIDataABIValues[f.staticABISignature[i]] = *clonedVal
+					} else {
+						// Handle error or nil case if needed, or log
+						fmt.Println("CuEVM Debug: error cloning ABI value", err)
+					}
+				}
+
+				fmt.Println("CuEVM Debug: staticABICallElementCache", worker.staticABICallElementCache)
+				fmt.Println("CuEVM Debug: staticABIMarkerOffsetCache", worker.staticABIMarkerOffsetCache)
+				fmt.Println("CuEVM Debug: staticABIDataABIValues", worker.staticABIDataABIValues)
+
+			}
 			// fmt.Println("CuEVM Debug: workerIdx", workerIndex, "worker.shrinkCallSequenceRequests", len(worker.shrinkCallSequenceRequests))
 			// Process any pending shrink requests
 			// for _, shrinkCallSequenceRequest := range worker.shrinkCallSequenceRequests {
@@ -1012,55 +1108,7 @@ func (f *Fuzzer) prepareWorkersDataInParallel(baseTestChain *chain.TestChain) (b
 				return
 			}
 
-			// Setup chain if this is the first run
-			if worker.chain == nil {
-				// fmt.Println("worker.chain is nil, setting up worker chain")
-				var err error
-				worker.chain, err = baseTestChain.Clone(func(initializedChain *chain.TestChain) error {
-					// Subscribe our chain event handlers
-					initializedChain.Events.ContractDeploymentAddedEventEmitter.Subscribe(worker.onChainContractDeploymentAddedEvent)
-					initializedChain.Events.ContractDeploymentRemovedEventEmitter.Subscribe(worker.onChainContractDeploymentRemovedEvent)
-
-					// If we have coverage-guided fuzzing enabled, create a tracer to collect coverage and connect it to the chain
-					if f.config.Fuzzing.CoverageEnabled {
-						worker.coverageTracer = coverage.NewCoverageTracer()
-						initializedChain.AddTracer(worker.coverageTracer.NativeTracer(), true, false)
-					}
-
-					// Copy the labels from the base chain to the worker's chain
-					initializedChain.Labels = maps.Clone(baseTestChain.Labels)
-
-					// Emit an event indicating the worker has created its chain
-					err := worker.Events.FuzzerWorkerChainCreated.Publish(FuzzerWorkerChainCreatedEvent{
-						Worker: worker,
-						Chain:  initializedChain,
-					})
-					// fmt.Println("error in fuzzer worker chain created clone", err)
-					return err
-				})
-
-				if err != nil {
-					errChan <- err
-					return
-				}
-
-				// Emit an event indicating the worker has set up its chain
-				err = worker.Events.FuzzerWorkerChainSetup.Publish(FuzzerWorkerChainSetupEvent{
-					Worker: worker,
-					Chain:  worker.chain,
-				})
-				if err != nil {
-					errChan <- fmt.Errorf("error returned by an event handler: %v", err)
-					return
-				}
-
-				// Increase our generation metric
-				worker.workerMetrics().workerStartupCount.Add(worker.workerMetrics().workerStartupCount, big.NewInt(1))
-
-				// Save the current block index as all contracts have been deployed at this point
-				worker.testingBaseBlockIndex = uint64(len(worker.chain.CommittedBlocks()))
-
-			} else {
+			{
 				// If we already have a chain, revert to the base state
 				err := worker.chain.RevertToBlockIndex(worker.testingBaseBlockIndex)
 				if err != nil {
@@ -1221,29 +1269,29 @@ func (f *Fuzzer) prepareWorkersDataInParallel(baseTestChain *chain.TestChain) (b
 }
 
 // prepareAndProcessTransactionDataInGPU extracts transaction data from call sequence elements and sends it to the GPU
-func (f *Fuzzer) runTransactionsGPU(workers []*FuzzerWorker) (*coverage.GPUExecutionResult, error) {
+func (f *Fuzzer) runTransactionsGPU(workers []*FuzzerWorker, txBatchSize, sequenceLength int) (*coverage.GPUExecutionResult, []int32, error) {
 	fmt.Println("\nGo: Preparing transaction data in batch for GPU processing worker\n")
 	// debug printing all sequences with idx
 	// for workerIdx, worker := range f.workers {
 	// 	for sequenceIdx, sequence := range worker.callSequenceElements {
 	// 		fmt.Println("CuEVM Debug: worker", workerIdx, "sequence", sequenceIdx)
 	// 		for elementIdx, element := range sequence {
-	// 			fmt.Println("CuEVM Debug: element", elementIdx, element.Call.DataAbiValues.Method, "data", hex.EncodeToString(element.Call.Data))
-	// 			fmt.Println("CuEVM Debug: element data markers", element.Call.DataMarkers)
+	// 			fmt.Println("CuEVM Debug: element", elementIdx, element)
 	// 		}
 	// 	}
 	// }
 	// Count valid call elements first
-	validCallCount := len(f.workers) * len(workers[0].callSequenceElements) * len(workers[0].callSequenceElements[0])
-	txBatchSize := len(f.workers) * len(workers[0].callSequenceElements)
-	sequenceLength := len(workers[0].callSequenceElements[0])
+	validCallCount := txBatchSize * sequenceLength //len(f.workers) * len(workers[0].callSequenceElements) * len(workers[0].callSequenceElements[0])
+	// txBatchSize := len(f.workers) * len(workers[0].callSequenceElements)
+	// sequenceLength := len(workers[0].callSequenceElements[0])
 	// Create block number and timestamp arrays
+	fmt.Println("CuEVM Debug: validCallCount", validCallCount, "txBatchSize", txBatchSize, "sequenceLength", sequenceLength)
 	blockNumbers := make([]uint64, validCallCount)
 	timestamps := make([]uint64, validCallCount)
 	var markerData []uint32
-	var markerOffsets []uint32
-	var markerCounts []uint32 // Number of markers per transaction
-	// fmt.Println("CuEVM Debug: validCallCount", validCallCount, "txBatchSize", txBatchSize, "sequenceLength", sequenceLength)
+	// var markerOffsets []uint32
+	// var markerCounts []uint32 // Number of markers per transaction
+	fmt.Println("CuEVM Debug: validCallCount", validCallCount, "txBatchSize", txBatchSize, "sequenceLength", sequenceLength)
 	// Use fixed from and to addresses (32 bytes each)
 	fromAddr := make([]byte, validCallCount*32) // 32 bytes for each from address
 	toAddr := make([]byte, 32)
@@ -1261,6 +1309,10 @@ func (f *Fuzzer) runTransactionsGPU(workers []*FuzzerWorker) (*coverage.GPUExecu
 	dataOffsets := make([]uint32, validCallCount)
 	dataSizes := make([]uint32, validCallCount)
 
+	// one marker offset per thread group  (divisible by f.skipSequenceSize)
+	markerOffsets := make([]int32, validCallCount/f.skipSequenceSize)
+	// merker data start with the count. followed by the 3 ints per marker
+	// markerDataSize := 0
 	// Fill arrays from call elements
 	idx := 0
 	dataOffset := 0
@@ -1273,6 +1325,7 @@ func (f *Fuzzer) runTransactionsGPU(workers []*FuzzerWorker) (*coverage.GPUExecu
 
 				call := worker.callSequenceElements[sequenceIdx][elementIdx].Call
 				if call == nil {
+					fmt.Println("\n\nCuEVM Debug: call is nil\n\n")
 					idx++
 					continue
 
@@ -1298,16 +1351,27 @@ func (f *Fuzzer) runTransactionsGPU(workers []*FuzzerWorker) (*coverage.GPUExecu
 				dataSizes[idx] = uint32(len(call.Data))
 				dataOffset += len(call.Data)
 				if idx%f.skipSequenceSize == 0 {
-					markerOffsets = append(markerOffsets, uint32(markerOffset))
-					markerCounts = append(markerCounts, uint32(len(call.DataMarkers)))
-					// fmt.Println("CuEVM Debug: idx", idx, "call.DataMarkers length", len(call.DataMarkers))
-					for _, marker := range call.DataMarkers {
-						// fmt.Println("CuEVM Debug: marker", idx, marker.Offset, marker.Type, marker.Length)
-						markerData = append(markerData, uint32(marker.Offset))
-						markerData = append(markerData, uint32(marker.Type))
-						markerData = append(markerData, uint32(marker.Length))
+					cachedMarkerOffset, exists := worker.staticABIMarkerOffsetCache[call.DataAbiValues.Method.Sig]
+
+					// fmt.Println("CuEVM Debug: cachedMarkerOffset", cachedMarkerOffset, "exists", exists)
+					if exists {
+						markerOffsets[idx/f.skipSequenceSize] = int32(-1 - cachedMarkerOffset) // start from -1 down, to not overlap with 0
+					} else {
+						markerOffsets[idx/f.skipSequenceSize] = int32(markerOffset)
+						// fmt.Println("CuEVM Debug: idx", idx, "idx/f.skipSequenceSize", idx/f.skipSequenceSize, "markerOffset", markerOffset)
+						// dynamic ABI encoding, need to add the markers to the markerData
+						// fmt.Println("CuEVM Debug: idx", idx, "call.DataMarkers length", len(call.DataMarkers))
+						// append the markers count first followed by the 3 ints per marker
+						markerData = append(markerData, uint32(len(call.DataMarkers)))
+						for _, marker := range call.DataMarkers {
+							// fmt.Println("CuEVM Debug: marker", idx, marker.Offset, marker.Type, marker.Length)
+							markerData = append(markerData, uint32(marker.Offset))
+							markerData = append(markerData, uint32(marker.Type))
+							markerData = append(markerData, uint32(marker.Length))
+						}
+						markerOffset += 1 + len(call.DataMarkers)*3 // 3 ints per marker + 1 int for the count
+
 					}
-					markerOffset += len(call.DataMarkers) * 3 // 3 ints per marker
 				}
 				idx++
 			}
@@ -1315,21 +1379,23 @@ func (f *Fuzzer) runTransactionsGPU(workers []*FuzzerWorker) (*coverage.GPUExecu
 			if idx%txBatchSize == 0 {
 				// Reset data offset for each batch
 				dataOffset = 0
-
-				markerOffset = 0
+				// CuEVM debug June 25, the reduced markerdata is shared across all batches
+				// markerOffset = 0
 			}
 		}
 	}
-	cMarkerOffsets := (*C.uint)(nil)
-	cMarkerCounts := (*C.uint)(nil)
+
+	// fmt.Println("CuEVM Debug: markerDataSize", markerDataSize)
+	// fmt.Println("CuEVM Debug: markerData", markerData)
+	// fmt.Println("CuEVM Debug: markerOffsets", markerOffsets)
+
+	cMarkerOffsets := (*C.int)(nil)
 	cMarkerData := (*C.uint)(nil)
 
 	if len(markerOffsets) > 0 {
-		cMarkerOffsets = (*C.uint)(unsafe.Pointer(&markerOffsets[0]))
+		cMarkerOffsets = (*C.int)(unsafe.Pointer(&markerOffsets[0]))
 	}
-	if len(markerCounts) > 0 {
-		cMarkerCounts = (*C.uint)(unsafe.Pointer(&markerCounts[0]))
-	}
+
 	if len(markerData) > 0 {
 		cMarkerData = (*C.uint)(unsafe.Pointer(&markerData[0]))
 	}
@@ -1367,7 +1433,6 @@ func (f *Fuzzer) runTransactionsGPU(workers []*FuzzerWorker) (*coverage.GPUExecu
 		(*C.uint)(unsafe.Pointer(&dataOffsets[0])),
 		(*C.uint)(unsafe.Pointer(&dataSizes[0])),
 		cMarkerOffsets,
-		cMarkerCounts,
 		cMarkerData,
 		C.uint32_t(len(markerData)),
 		C.uint32_t(txBatchSize),
@@ -1421,7 +1486,7 @@ func (f *Fuzzer) runTransactionsGPU(workers []*FuzzerWorker) (*coverage.GPUExecu
 
 			// Free the C memory
 			C.free_simplified_gpu_result(cResult)
-			return gpuResult, nil
+			return gpuResult, markerOffsets, nil
 		}
 		// TODO: free other C memory
 		// Free the C memory
@@ -1430,14 +1495,14 @@ func (f *Fuzzer) runTransactionsGPU(workers []*FuzzerWorker) (*coverage.GPUExecu
 	} else {
 		fmt.Println("CuEVM Debug: C function returned nil result")
 	}
-	return nil, nil
+	return nil, nil, nil
 }
 
 // prepareAndProcessChainStateInGPU extracts the chain state and block header information and sends it to the GPU
 func (f *Fuzzer) prepareAndProcessChainStateInGPU(testChain *chain.TestChain) error {
 	if f.GPUchainInitiated {
 		fmt.Println("\n\n GPU chain already initiated, skipping JSON dump state\n\n")
-		result := C.process_json_state_gpu(nil, C.uint(f.config.Fuzzing.Workers), true, C.uint(f.skipSequenceSize), nil)
+		result := C.process_json_state_gpu(nil, C.uint(f.config.Fuzzing.Workers), true, C.uint(f.skipSequenceSize), nil, nil, 0)
 		if result != 0 {
 			return fmt.Errorf("C++ GPU state processing returned error code: %d", result)
 		}
@@ -1525,8 +1590,25 @@ func (f *Fuzzer) prepareAndProcessChainStateInGPU(testChain *chain.TestChain) er
 	cJSON := C.CString(stateJSON)
 	defer C.free(unsafe.Pointer(cJSON))
 
+	fmt.Println("CuEVM Debug: valueset ")
+	addressSet := f.BaseValueSet().Addresses()
+	integerSet := f.BaseValueSet().Integers()
+	// Sort for deterministic order
+	sort.Slice(addressSet, func(i, j int) bool {
+		return addressSet[i].Hex() < addressSet[j].Hex()
+	})
+	sort.Slice(integerSet, func(i, j int) bool {
+		return integerSet[i].Cmp(integerSet[j]) < 0
+	})
+	for _, addr := range addressSet {
+		fmt.Println("CuEVM Debug: address", addr.Hex())
+	}
+
+	for _, integer := range integerSet {
+		fmt.Println("CuEVM Debug: integer", hex.EncodeToString(integer.Bytes()))
+	}
 	// groupConstantsByTypeHex groups slither constants by type and converts values to hex strings as required.
-	groupedConstants := groupConstantsByTypeHex(f.BaseValueSet().Addresses(), f.BaseValueSet().Integers())
+	groupedConstants := groupConstantsByTypeHex(addressSet, integerSet)
 	constantsBytes, err := json.Marshal(groupedConstants)
 	var constantJSON *C.char
 	if err != nil {
@@ -1540,19 +1622,23 @@ func (f *Fuzzer) prepareAndProcessChainStateInGPU(testChain *chain.TestChain) er
 	// fmt.Println("\n\nCuEVM Debug: constantJSON", string(constantsBytes))
 	// fmt.Println("\n\n")
 
-	fmt.Println("CuEVM Debug: valueset ")
-	addressSet := f.BaseValueSet().Addresses()
-	for _, addr := range addressSet {
-		fmt.Println("CuEVM Debug: address", addr.Hex())
-	}
-	integerSet := f.BaseValueSet().Integers()
-	for _, integer := range integerSet {
-		fmt.Println("CuEVM Debug: integer", hex.EncodeToString(integer.Bytes()))
-	}
-
 	defer C.free(unsafe.Pointer(constantJSON))
 
-	result := C.process_json_state_gpu(cJSON, C.uint(f.config.Fuzzing.Workers), false, C.uint(f.skipSequenceSize), constantJSON)
+	cFlattenedMarkers := (*C.uint)(nil)
+	if len(f.staticABIFlattenedMarkers) > 0 {
+		cFlattenedMarkers = (*C.uint)(unsafe.Pointer(&f.staticABIFlattenedMarkers[0]))
+	}
+	// create markers data for static aBI methods
+
+	fmt.Println("CuEVM Debug: flattened markerData")
+	for _, marker := range f.staticABIFlattenedMarkers {
+		fmt.Println("CuEVM Debug: marker", marker)
+	}
+
+	result := C.process_json_state_gpu(cJSON, C.uint(f.config.Fuzzing.Workers), false, C.uint(f.skipSequenceSize), constantJSON,
+		cFlattenedMarkers,
+		C.uint(len(f.staticABIFlattenedMarkers)),
+	)
 
 	// Check the result
 	if result != 0 {
@@ -1650,7 +1736,7 @@ func convertStateToJSON(stateDump *ethstate.Dump, blockHeader *types.Header) str
 	return string(jsonBytes)
 }
 
-func (f *Fuzzer) restore_mutation(data []byte, callDataMarkers []calls.DataMarker, sequenceIdx, elementIdx int) []byte {
+func (f *Fuzzer) restore_mutation(data []byte, dataMarkers []calls.DataMarker, sequenceIdx, elementIdx int) []byte {
 	const (
 		a                                     = 1664525
 		c                                     = 1013904223
@@ -1658,6 +1744,7 @@ func (f *Fuzzer) restore_mutation(data []byte, callDataMarkers []calls.DataMarke
 		CHANCE_TO_TAKE_INTEGER_FROM_CONSTANTS = 50
 		CHANCE_TO_CREATE_NEW_INTEGER          = 2
 		CHANCE_TO_CREATE_NEW_ADDRESS          = 0
+		CHANCE_TO_SKIP_MUTATE                 = 50
 	)
 
 	// Mutate a byte array in-place, starting at data[0]
@@ -1696,10 +1783,16 @@ func (f *Fuzzer) restore_mutation(data []byte, callDataMarkers []calls.DataMarke
 	mutated := make([]byte, len(data))
 	copy(mutated, data)
 
-	for _, marker := range callDataMarkers {
+	for _, marker := range dataMarkers {
+		// read the marker data, skip the first element (markerLength)
 		elementOffset := int(marker.Offset)
-		elementType := marker.Type
+		elementType := int(marker.Type)
 		elementLength := uint32(marker.Length)
+		seed = (a*seed + c) % m
+		randomChance := seed % 100
+		if randomChance <= CHANCE_TO_SKIP_MUTATE {
+			continue
+		}
 
 		slice := mutated[elementOffset:] // operate directly on the sub-slice
 
@@ -1780,12 +1873,15 @@ func (f *Fuzzer) launchGPUKernel() error {
 		}
 	}
 	// CuEVM May version, send back the idx in all sequence elements for seed update.
-
-	gpuResults, err := f.runTransactionsGPU(f.workers)
+	txBatchSize := f.sequencesPerCPUWorker * f.numCPUWorkers
+	sequenceLength := f.config.Fuzzing.CallSequenceLength
+	gpuResults, markerOffsets, err := f.runTransactionsGPU(f.workers, txBatchSize, sequenceLength)
 	// fmt.Println("CuEVM Debug: gpuResults", gpuResults.DebugString(), "err", err)
+	// fmt.Println("CuEVM Debug: markerOffsets", markerOffsets)
 
+	// fmt.Println("CuEVM Debug: txBatchSize", txBatchSize)
 	if err == nil {
-		bigIntWeightValue := big.NewInt(int64((f.loopCounter + 1) * f.sequencesPerCPUWorker * f.numCPUWorkers / 10))
+		bigIntWeightValue := big.NewInt(max(10, int64((f.loopCounter+1)*f.sequencesPerCPUWorker*f.numCPUWorkers/10)))
 		f.assertion_test_provider.GPUPostCallTest(f.workers, gpuResults, bigIntWeightValue)
 
 		// add all call sequences to corpus
@@ -1795,7 +1891,7 @@ func (f *Fuzzer) launchGPUKernel() error {
 				workerIdx := rawIdx / f.sequencesPerCPUWorker
 				sequenceIdx := rawIdx % f.sequencesPerCPUWorker
 				elementIdx := batchIdx
-				// fmt.Println("CuEVM Debug: rawIdx", rawIdx, "workerIdx", workerIdx, "sequenceIdx", sequenceIdx, "elementIdx", elementIdx)
+				// fmt.Println("CuEVM Debug: batchIdx", batchIdx, "rawIdx", rawIdx, "workerIdx", workerIdx, "sequenceIdx", sequenceIdx, "elementIdx", elementIdx)
 				// Create a sequence from element 0 to elementIdx
 				fullSequence := make(calls.CallSequence, elementIdx+1)
 				for i := 0; i <= elementIdx; i++ {
@@ -1806,14 +1902,38 @@ func (f *Fuzzer) launchGPUKernel() error {
 					// 	continue
 					// }
 					// debug disable mutaiton
-
-					dataMarkers := f.workers[workerIdx].callSequenceElements[(sequenceIdx/f.skipSequenceSize)*f.skipSequenceSize][i].Call.DataMarkers
+					// Warning i is element index in a squence
+					// Need to reply i when reconstructing the sequence
+					markerOffsetIdx := (rawIdx + i*txBatchSize) / f.skipSequenceSize
+					methodSig := fullSequence[i].Call.DataAbiValues.Method.Sig
+					// fmt.Println("CuEVM Debug: markerOffsetIdx", markerOffsetIdx, "methodSig", methodSig)
+					var dataMarkers []calls.DataMarker
+					if markerOffsets[markerOffsetIdx] < 0 {
+						dataMarkers = f.staticABIMarkers[f.staticABIMarkerIndexMap[methodSig]]
+					} else {
+						// fmt.Println("CuEVM Debug: markerOffsets[markerOffsetIdx] (sequenceIdx/f.skipSequenceSize)*f.skipSequenceSize", markerOffsets[markerOffsetIdx], "sequenceIdx", sequenceIdx, "i", i)
+						dataMarkers = f.workers[workerIdx].callSequenceElements[(sequenceIdx/f.skipSequenceSize)*f.skipSequenceSize][i].Call.DataMarkers
+					}
+					// fmt.Println("CuEVM Debug: dataMarkers", dataMarkers)
+					// dataMarkers := f.workers[workerIdx].callSequenceElements[(sequenceIdx/f.skipSequenceSize)*f.skipSequenceSize][i].Call.DataMarkers
 
 					mutatedData := f.restore_mutation(fullSequence[i].Call.Data, dataMarkers, rawIdx, i)
 					inputData := mutatedData[4:] // skip the method ID
 					inputValues, err := fullSequence[i].Call.DataAbiValues.Method.Inputs.Unpack(inputData)
 					if err != nil {
 						fmt.Println("\n\nCuEVM Debug: unpack error\n\n", err)
+						// fmt.Println("CuEVM Debug: fullSequence[i].Call.DataAbiValues.Method.Inputs", fullSequence[i].Call.DataAbiValues.Method.Inputs)
+						// fmt.Println("CuEVM Debug: mutatedData", hex.EncodeToString(mutatedData))
+						// fmt.Println("CuEVM Debug: fullSequence[i].Call.DataAbiValues.Method.Name", fullSequence[i].Call.DataAbiValues.Method.Name)
+						// fmt.Println("original data", hex.EncodeToString(fullSequence[i].Call.Data))
+						// fmt.Println("markerOffsets", markerOffsets)
+						// fmt.Println("markerOffsetIdx", markerOffsetIdx)
+						// fmt.Println("rawIdx", rawIdx)
+						// fmt.Println("batchIdx", batchIdx)
+						// fmt.Println("txBatchSize", txBatchSize)
+						// fmt.Println("f.skipSequenceSize", f.skipSequenceSize)
+						// fmt.Println("sequenceIdx", sequenceIdx)
+						// fmt.Println("dataMarkers", dataMarkers)
 						// handle error
 					}
 					// fmt.Println("CuEVM debug original data ", hex.EncodeToString(fullSequence[i].Call.Data))
@@ -2024,11 +2144,12 @@ func (f *Fuzzer) RunAllSequences() {
 
 	f.logger.Info("Running all ", colors.Bold, len(callSequencesToTest), colors.Reset, " sequences in corpus for final coverage")
 
+	finalSequenceWorkers := 1 // f.numCPUWorkers
 	// Distribute sequences across available workers
-	sequencesPerWorker := (len(callSequencesToTest) + f.numCPUWorkers - 1) / f.numCPUWorkers
+	sequencesPerWorker := (len(callSequencesToTest) + finalSequenceWorkers - 1) / finalSequenceWorkers
 
 	var wg sync.WaitGroup
-	for i := 0; i < f.numCPUWorkers; i++ {
+	for i := 0; i < finalSequenceWorkers; i++ {
 
 		worker := f.workers[i]
 		// Create a simple execution check function just for recording coverage
@@ -2105,7 +2226,7 @@ func (f *Fuzzer) Start() error {
 	rawSequencesPerWorker := f.config.Fuzzing.Workers / f.numCPUWorkers
 
 	// Round up to next multiple of skipSequenceSize
-	roundedSequencesPerWorker := ((rawSequencesPerWorker + f.skipSequenceSize - 1) / f.skipSequenceSize) * f.skipSequenceSize
+	roundedSequencesPerWorker := max(f.skipSequenceSize, ((rawSequencesPerWorker+f.skipSequenceSize-1)/f.skipSequenceSize)*f.skipSequenceSize)
 
 	// Update total workers to ensure proper division
 	f.config.Fuzzing.Workers = roundedSequencesPerWorker * f.numCPUWorkers

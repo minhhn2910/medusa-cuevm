@@ -5,6 +5,7 @@ import (
 	"math/big"
 	"reflect"
 	"regexp"
+	"strings"
 
 	"github.com/crytic/medusa-geth/accounts/abi"
 	"github.com/crytic/medusa/fuzzing/calls"
@@ -254,6 +255,151 @@ func (g *CallSequenceGenerator) InitializeNextSequence() (bool, error) {
 	return true, nil
 }
 
+// hasDynamicEncoding detects if a function signature contains dynamic types (bytes, string, or dynamic arrays)
+func hasDynamicEncoding(signature string) bool {
+	// Extract parameters between parentheses
+	start := strings.Index(signature, "(")
+	end := strings.LastIndex(signature, ")")
+	if start == -1 || end == -1 || start >= end {
+		return false
+	}
+	params := signature[start+1 : end]
+
+	// Check for dynamic patterns
+	return strings.Contains(params, "[]") || // dynamic arrays
+		strings.Contains(params, "string") || // string type
+		(strings.Contains(params, "bytes") && !regexp.MustCompile(`bytes\d`).MatchString(params)) // dynamic bytes (not bytes1, bytes2, etc.)
+}
+
+// Warning: this function is not thread safe, and should only be called once at the beginning of the fuzzing campaign
+func (g *CallSequenceGenerator) seedSequenceElementCache() {
+	fmt.Println("\n\nCuEVM Debug: seedSequenceElementCache")
+	selectedSender := g.worker.fuzzer.senders[g.worker.randomProvider.Intn(len(g.worker.fuzzer.senders))]
+	big_one := big.NewInt(1)
+	big_zero := big.NewInt(0)
+	markerOffset := 0
+	for _, method := range g.worker.stateChangingMethods {
+		isDynamic := hasDynamicEncoding(method.Method.Sig)
+		if isDynamic {
+			g.worker.fuzzer.signatureDynamicEncoding = append(g.worker.fuzzer.signatureDynamicEncoding, method.Method.Sig)
+			continue
+		}
+		args := make([]any, len(method.Method.Inputs))
+		g.generatedArrayLengths = make([]int, 0)
+		for i := 0; i < len(args); i++ {
+			// Create our fuzzed parameters.
+			input := method.Method.Inputs[i]
+			// args[i] = valuegeneration.GenerateAbiValue(g.config.ValueGenerator, &input.Type)
+			if len(g.generatedArrayLengths) == 0 {
+				args[i] = valuegeneration.GenerateAbiValueWithArrayLength(g.config.ValueGenerator, &input.Type, -1)
+			} else {
+				// 50% chance to use the existing array length
+				if g.worker.randomProvider.Intn(2) == 0 {
+					args[i] = valuegeneration.GenerateAbiValueWithArrayLength(g.config.ValueGenerator, &input.Type, -1)
+				} else {
+					random_idx := g.worker.randomProvider.Intn(len(g.generatedArrayLengths))
+					args[i] = valuegeneration.GenerateAbiValueWithArrayLength(g.config.ValueGenerator, &input.Type, g.generatedArrayLengths[random_idx])
+				}
+			}
+			// fmt.Println("CuEVM Debug: args[i]", args[i])
+			// fmt.Println("CuEVM Debug: input.Type", input.Type)
+			if input.Type.T == abi.SliceTy {
+				reflectValue := reflect.ValueOf(args[i])
+				actualLength := reflectValue.Len() // This will give you the length
+				g.generatedArrayLengths = append(g.generatedArrayLengths, actualLength)
+				// fmt.Println("CuEVM Debug: generatedArrayLengths", g.generatedArrayLengths)
+			}
+		}
+		msg, markers := calls.NewCallMessageWithAbiValueDataAndMask(selectedSender, &method.Address, 0, big_zero, g.worker.fuzzer.config.Fuzzing.TransactionGasLimit, big_one, big_zero, big_zero, &calls.CallMessageDataAbiValues{
+			Method:      &method.Method,
+			InputValues: args,
+		})
+		// clone call data
+		clonedData := make([]byte, len(msg.Data))
+		copy(clonedData, msg.Data)
+		g.worker.fuzzer.staticABICallData = append(g.worker.fuzzer.staticABICallData, clonedData)
+		g.worker.fuzzer.staticABIDataABIValues = append(g.worker.fuzzer.staticABIDataABIValues, *msg.DataAbiValues)
+		g.worker.fuzzer.staticABISignature = append(g.worker.fuzzer.staticABISignature, method.Method.Sig)
+		g.worker.fuzzer.staticABIMarkers = append(g.worker.fuzzer.staticABIMarkers, markers)
+		g.worker.fuzzer.staticABIMarkerOffset = append(g.worker.fuzzer.staticABIMarkerOffset, uint32(markerOffset))
+		g.worker.fuzzer.staticABIFlattenedMarkers = append(g.worker.fuzzer.staticABIFlattenedMarkers, uint32(len(markers)))
+		markerOffset += 1
+
+		if len(markers) > 0 {
+			for _, marker := range markers {
+				g.worker.fuzzer.staticABIFlattenedMarkers = append(g.worker.fuzzer.staticABIFlattenedMarkers, uint32(marker.Offset), uint32(marker.Type), uint32(marker.Length))
+			}
+
+			markerOffset += len(markers) * 3
+		}
+		g.worker.fuzzer.staticABIMarkerIndexMap[method.Method.Sig] = len(g.worker.fuzzer.staticABISignature) - 1
+	}
+
+	for _, method := range g.worker.pureMethods {
+		isDynamic := hasDynamicEncoding(method.Method.Sig)
+		if isDynamic {
+			g.worker.fuzzer.signatureDynamicEncoding = append(g.worker.fuzzer.signatureDynamicEncoding, method.Method.Sig)
+			continue
+		}
+		args := make([]any, len(method.Method.Inputs))
+		g.generatedArrayLengths = make([]int, 0)
+		for i := 0; i < len(args); i++ {
+			// Create our fuzzed parameters.
+			input := method.Method.Inputs[i]
+			// args[i] = valuegeneration.GenerateAbiValue(g.config.ValueGenerator, &input.Type)
+			if len(g.generatedArrayLengths) == 0 {
+				args[i] = valuegeneration.GenerateAbiValueWithArrayLength(g.config.ValueGenerator, &input.Type, -1)
+			} else {
+				// 50% chance to use the existing array length
+				if g.worker.randomProvider.Intn(2) == 0 {
+					args[i] = valuegeneration.GenerateAbiValueWithArrayLength(g.config.ValueGenerator, &input.Type, -1)
+				} else {
+					random_idx := g.worker.randomProvider.Intn(len(g.generatedArrayLengths))
+					args[i] = valuegeneration.GenerateAbiValueWithArrayLength(g.config.ValueGenerator, &input.Type, g.generatedArrayLengths[random_idx])
+				}
+			}
+			// fmt.Println("CuEVM Debug: args[i]", args[i])
+			// fmt.Println("CuEVM Debug: input.Type", input.Type)
+			if input.Type.T == abi.SliceTy {
+				reflectValue := reflect.ValueOf(args[i])
+				actualLength := reflectValue.Len() // This will give you the length
+				g.generatedArrayLengths = append(g.generatedArrayLengths, actualLength)
+				// fmt.Println("CuEVM Debug: generatedArrayLengths", g.generatedArrayLengths)
+			}
+		}
+
+		fmt.Println("CuEVM Debug: method.Method.Inputs", method.Method.Inputs)
+		fmt.Println("CuEVM Debug: args", args)
+		msg, markers := calls.NewCallMessageWithAbiValueDataAndMask(selectedSender, &method.Address, 0, big_zero, g.worker.fuzzer.config.Fuzzing.TransactionGasLimit, big_one, big_zero, big_zero, &calls.CallMessageDataAbiValues{
+			Method:      &method.Method,
+			InputValues: args,
+		})
+		// clone call data
+		clonedData := make([]byte, len(msg.Data))
+		copy(clonedData, msg.Data)
+		g.worker.fuzzer.staticABICallData = append(g.worker.fuzzer.staticABICallData, clonedData)
+		g.worker.fuzzer.staticABIDataABIValues = append(g.worker.fuzzer.staticABIDataABIValues, *msg.DataAbiValues)
+		g.worker.fuzzer.staticABISignature = append(g.worker.fuzzer.staticABISignature, method.Method.Sig)
+		g.worker.fuzzer.staticABIMarkers = append(g.worker.fuzzer.staticABIMarkers, markers)
+		g.worker.fuzzer.staticABIMarkerOffset = append(g.worker.fuzzer.staticABIMarkerOffset, uint32(markerOffset))
+		g.worker.fuzzer.staticABIFlattenedMarkers = append(g.worker.fuzzer.staticABIFlattenedMarkers, uint32(len(markers)))
+		markerOffset += 1
+
+		if len(markers) > 0 {
+			for _, marker := range markers {
+				g.worker.fuzzer.staticABIFlattenedMarkers = append(g.worker.fuzzer.staticABIFlattenedMarkers, uint32(marker.Offset), uint32(marker.Type), uint32(marker.Length))
+			}
+
+			markerOffset += len(markers) * 3
+		}
+
+		g.worker.fuzzer.staticABIMarkerIndexMap[method.Method.Sig] = len(g.worker.fuzzer.staticABISignature) - 1
+	}
+
+	fmt.Println("\n\nCuEVM Debug: end seedSequenceElementCache\n\n")
+
+}
+
 // PopSequenceElement obtains the next element for our call sequence requested by InitializeNextSequence. If there are no elements
 // left to return, this method returns nil. If an error occurs, it is returned instead.
 func (g *CallSequenceGenerator) PopSequenceElement(isFirstSequence bool) (*calls.CallSequenceElement, error) {
@@ -289,7 +435,7 @@ func (g *CallSequenceGenerator) PopSequenceElement(isFirstSequence bool) (*calls
 					}
 					// Find the relation for this function
 					for _, rel := range relations {
-						if rel.Function == functionName {
+						if normalizeSignature(rel.Function) == normalizeSignature(functionName) {
 							// Add all impacted functions to the pool
 							for _, impacted := range rel.IsImpactedBy {
 								pool = append(pool, impacted)
@@ -317,7 +463,7 @@ func (g *CallSequenceGenerator) PopSequenceElement(isFirstSequence bool) (*calls
 						}
 						// Find the relation for this function
 						for _, rel := range relations {
-							if rel.Function == functionName {
+							if normalizeSignature(rel.Function) == normalizeSignature(functionName) {
 								// fmt.Println("CuEVM Debug: rel.Function", rel.Function)
 								// Add all impacted functions to the pool
 								for _, impacted := range rel.Impacts {
@@ -349,13 +495,9 @@ func (g *CallSequenceGenerator) PopSequenceElement(isFirstSequence bool) (*calls
 		element = elementWithMask
 
 		// Debug print the masks
-		if element.Call != nil && element.Call.DataAbiValues != nil {
-			// fmt.Printf("CuEVM Debug: Method: %s\n", element.Call.DataAbiValues.Method)
-			// fmt.Println("CuEVM Debug: masks", masks)
-			// // print as hex
-			// fmt.Println("CuEVM Debug: element data ", hex.EncodeToString(element.Call.Data))
 
-		}
+		// fmt.Printf("CuEVM Debug: Method: %s\n", elementWithMask)
+		// fmt.Println("CuEVM Debug: masks", elementWithMask.Call.DataMarkers)
 
 	} else {
 		// We have an element, if our generator set a post-call modify for this function, execute it now to modify
@@ -420,10 +562,22 @@ func (g *CallSequenceGenerator) PopSequenceElement(isFirstSequence bool) (*calls
 					blockNumberDelay %= blockTimestampDelay
 				}
 			}
-			msg := calls.NewCallMessageWithAbiValueData(selectedSender, element.Call.To, 0, value, g.worker.fuzzer.config.Fuzzing.TransactionGasLimit, big_one, big_zero, big_zero, &calls.CallMessageDataAbiValues{
-				Method:      selectedMethod,
-				InputValues: args,
-			})
+			var msg *calls.CallMessage
+
+			if g.worker.staticABICallElementCache[selectedMethod.Sig] != nil {
+				// fmt.Println("\n\nUsing cached static ABI call element", selectedMethod.Sig)
+				abiValues := g.worker.staticABIDataABIValues[selectedMethod.Sig]
+				msg = calls.NewCallMessageWithData(selectedSender, element.Call.To, 0, value, g.worker.fuzzer.config.Fuzzing.TransactionGasLimit, big_one, big_zero, big_zero, g.worker.staticABICallElementCache[selectedMethod.Sig], &abiValues)
+				msg.DataMarkers = nil
+			} else {
+				// TODO: not 100% static, have to check
+				msg = calls.NewCallMessageWithAbiValueData(selectedSender, element.Call.To, 0, value, g.worker.fuzzer.config.Fuzzing.TransactionGasLimit, big_one, big_zero, big_zero, &calls.CallMessageDataAbiValues{
+					Method:      selectedMethod,
+					InputValues: args,
+				})
+
+			}
+
 			if isFirstSequence {
 				msg.DataMarkers = element.Call.DataMarkers
 			}
@@ -437,6 +591,7 @@ func (g *CallSequenceGenerator) PopSequenceElement(isFirstSequence bool) (*calls
 
 	// Update our base sequence, advance our position, and return the processed element from this round.
 	g.baseSequence[g.fetchIndex] = element
+	// fmt.Println("CuEVM Debug: PopSequenceElement - element", element)
 	g.fetchIndex++
 	return element, nil
 }
@@ -461,9 +616,11 @@ func (g *CallSequenceGenerator) generateNewElement() (*calls.CallSequenceElement
 	var selectedMethod *contracts.DeployedContractMethod
 	// CuEVM: many txs in paralel so we can afford to increase this chance
 	if (len(g.worker.pureMethods) > 0 && g.worker.randomProvider.Intn(100) == 1) || callOnlyPureFunctions {
+		fmt.Println("CuEVM Debug: generate a pure method")
 		// if (len(g.worker.pureMethods) > 0 && g.worker.randomProvider.Intn(1000) == 0) || callOnlyPureFunctions {
 		selectedMethod = &g.worker.pureMethods[g.worker.randomProvider.Intn(len(g.worker.pureMethods))]
 	} else {
+		fmt.Println("CuEVM Debug: generate a state changing method")
 		selectedMethod = &g.worker.stateChangingMethods[g.worker.randomProvider.Intn(len(g.worker.stateChangingMethods))]
 	}
 
@@ -583,35 +740,6 @@ func (g *CallSequenceGenerator) generateNewElementWithMutationMask(candidate_poo
 
 	// Select a random sender
 	selectedSender := g.worker.fuzzer.senders[g.worker.randomProvider.Intn(len(g.worker.fuzzer.senders))]
-
-	// Generate fuzzed parameters for the function call
-	args := make([]any, len(selectedMethod.Method.Inputs))
-	g.generatedArrayLengths = make([]int, 0)
-	for i := 0; i < len(args); i++ {
-		// Create our fuzzed parameters.
-		input := selectedMethod.Method.Inputs[i]
-		// args[i] = valuegeneration.GenerateAbiValue(g.config.ValueGenerator, &input.Type)
-		if len(g.generatedArrayLengths) == 0 {
-			args[i] = valuegeneration.GenerateAbiValueWithArrayLength(g.config.ValueGenerator, &input.Type, -1)
-		} else {
-			// 50% chance to use the existing array length
-			if g.worker.randomProvider.Intn(2) == 0 {
-				args[i] = valuegeneration.GenerateAbiValueWithArrayLength(g.config.ValueGenerator, &input.Type, -1)
-			} else {
-				random_idx := g.worker.randomProvider.Intn(len(g.generatedArrayLengths))
-				args[i] = valuegeneration.GenerateAbiValueWithArrayLength(g.config.ValueGenerator, &input.Type, g.generatedArrayLengths[random_idx])
-			}
-		}
-		// fmt.Println("CuEVM Debug: args[i]", args[i])
-		// fmt.Println("CuEVM Debug: input.Type", input.Type)
-		if input.Type.T == abi.SliceTy {
-			reflectValue := reflect.ValueOf(args[i])
-			actualLength := reflectValue.Len() // This will give you the length
-			g.generatedArrayLengths = append(g.generatedArrayLengths, actualLength)
-			// fmt.Println("CuEVM Debug: generatedArrayLengths", g.generatedArrayLengths)
-		}
-	}
-
 	// If this is a payable function, generate value to send
 	var value *big.Int
 	value = big.NewInt(0)
@@ -620,13 +748,65 @@ func (g *CallSequenceGenerator) generateNewElementWithMutationMask(candidate_poo
 	}
 	big_one := big.NewInt(1)
 	big_zero := big.NewInt(0)
-	// Create our message using the provided parameters.
-	// We fill out some fields and populate the rest from our TestChain properties.
-	// TODO: We likely want to make gasPrice fluctuate within some sensible range here.
-	msg, masks := calls.NewCallMessageWithAbiValueDataAndMask(selectedSender, &selectedMethod.Address, 0, value, g.worker.fuzzer.config.Fuzzing.TransactionGasLimit, big_one, big_zero, big_zero, &calls.CallMessageDataAbiValues{
-		Method:      &selectedMethod.Method,
-		InputValues: args,
-	})
+	var msg *calls.CallMessage
+	var masks []calls.DataMarker
+
+	if g.worker.staticABICallElementCache[selectedMethod.Method.Sig] != nil {
+		// fmt.Println("\n\nUsing cached static ABI call element", selectedMethod.Method.Sig)
+		abiValues := g.worker.staticABIDataABIValues[selectedMethod.Method.Sig]
+		msg = calls.NewCallMessageWithData(
+			selectedSender,
+			&selectedMethod.Address,
+			0,
+			value,
+			g.worker.fuzzer.config.Fuzzing.TransactionGasLimit,
+			big_one,
+			big_zero,
+			big_zero,
+			g.worker.staticABICallElementCache[selectedMethod.Method.Sig],
+			&abiValues,
+		)
+		masks = nil
+		msg.DataMarkers = nil
+	} else {
+		// fmt.Println("CuEVM Debug: dynamic ABI method")
+		// Generate fuzzed parameters for the function call
+		args := make([]any, len(selectedMethod.Method.Inputs))
+		g.generatedArrayLengths = make([]int, 0)
+		for i := 0; i < len(args); i++ {
+			// Create our fuzzed parameters.
+			input := selectedMethod.Method.Inputs[i]
+			// args[i] = valuegeneration.GenerateAbiValue(g.config.ValueGenerator, &input.Type)
+			if len(g.generatedArrayLengths) == 0 {
+				args[i] = valuegeneration.GenerateAbiValueWithArrayLength(g.config.ValueGenerator, &input.Type, -1)
+			} else {
+				// 50% chance to use the existing array length
+				if g.worker.randomProvider.Intn(2) == 0 {
+					args[i] = valuegeneration.GenerateAbiValueWithArrayLength(g.config.ValueGenerator, &input.Type, -1)
+				} else {
+					random_idx := g.worker.randomProvider.Intn(len(g.generatedArrayLengths))
+					args[i] = valuegeneration.GenerateAbiValueWithArrayLength(g.config.ValueGenerator, &input.Type, g.generatedArrayLengths[random_idx])
+				}
+			}
+			// fmt.Println("CuEVM Debug: args[i]", args[i])
+			// fmt.Println("CuEVM Debug: input.Type", input.Type)
+			if input.Type.T == abi.SliceTy {
+				reflectValue := reflect.ValueOf(args[i])
+				actualLength := reflectValue.Len() // This will give you the length
+				g.generatedArrayLengths = append(g.generatedArrayLengths, actualLength)
+				// fmt.Println("CuEVM Debug: generatedArrayLengths", g.generatedArrayLengths)
+			}
+		}
+
+		// Create our message using the provided parameters.
+		// We fill out some fields and populate the rest from our TestChain properties.
+
+		msg, masks = calls.NewCallMessageWithAbiValueDataAndMask(selectedSender, &selectedMethod.Address, 0, value, g.worker.fuzzer.config.Fuzzing.TransactionGasLimit, big_one, big_zero, big_zero, &calls.CallMessageDataAbiValues{
+			Method:      &selectedMethod.Method,
+			InputValues: args,
+		})
+
+	}
 
 	if g.worker.fuzzer.config.Fuzzing.TestChainConfig.SkipAccountChecks {
 		msg.SkipAccountChecks = true

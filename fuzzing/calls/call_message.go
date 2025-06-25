@@ -117,6 +117,25 @@ func NewCallMessage(from common.Address, to *common.Address, nonce uint64, value
 	}
 }
 
+// NewCallMessage instantiates a new call message from a given set of parameters, with call data set from bytes.
+func NewCallMessageWithData(from common.Address, to *common.Address, nonce uint64, value *big.Int, gasLimit uint64, gasPrice, gasFeeCap, gasTipCap *big.Int, data []byte, dataAbiValues *CallMessageDataAbiValues) *CallMessage {
+	// Construct and return a new message from our given parameters.
+	return &CallMessage{
+		From:              from,
+		To:                to,
+		Nonce:             nonce,
+		Value:             value,
+		GasLimit:          gasLimit,
+		GasPrice:          gasPrice,
+		GasFeeCap:         gasFeeCap,
+		GasTipCap:         gasTipCap,
+		Data:              data,
+		DataAbiValues:     dataAbiValues,
+		AccessList:        nil,
+		SkipAccountChecks: false,
+	}
+}
+
 // NewCallMessageWithAbiValueData instantiates a new call message from a given set of parameters, with call data set
 // from method ABI specified inputs.
 func NewCallMessageWithAbiValueData(from common.Address, to *common.Address, nonce uint64, value *big.Int, gasLimit uint64, gasPrice, gasFeeCap, gasTipCap *big.Int, abiData *CallMessageDataAbiValues) *CallMessage {
