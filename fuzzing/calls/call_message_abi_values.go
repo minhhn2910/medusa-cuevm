@@ -160,6 +160,10 @@ func (d *CallMessageDataAbiValues) PackWithMask() ([]byte, []DataMarker, error) 
 	abiArgs := d.Method.Inputs
 	args := d.InputValues
 
+	// add special marker for Value muation
+	if d.Method.IsPayable() {
+		markers = append(markers, DataMarker{Offset: 0, Type: DataTypeValue, Length: 32})
+	}
 	// --- Pass 1: Pack arguments and build argData ---
 
 	initialTailOffset := 0
@@ -260,11 +264,15 @@ func (d *CallMessageDataAbiValues) PackWithMask() ([]byte, []DataMarker, error) 
 	}
 
 	// Adjust all marker offsets by 4 bytes for the method ID.
-	for i := range markers {
-		markers[i].Offset += 4
+	if d.Method.Sig != "CuEVM::fallback()" {
+		for i := range markers {
+			markers[i].Offset += 4
+		}
 	}
+	// CuEVM: decode and pack tempoarily fixed first 4 bytes for fallback and receive
 
 	finalCallData := append(d.Method.ID, argData...)
+
 	return finalCallData, markers, nil
 }
 

@@ -27,6 +27,12 @@ type ValueSet struct {
 	bytes map[string][]byte
 	// hashProvider represents a hash provider used to create keys for some data.
 	hashProvider hash.Hash
+
+	// array for GPU data generation & mutator
+	addressesArray []common.Address
+	integersArray []*big.Int
+	stringsArray []string
+	bytesArray [][]byte
 }
 
 // NewValueSet initializes a new ValueSet object for use with a Fuzzer.
@@ -52,7 +58,32 @@ func (vs *ValueSet) Clone() *ValueSet {
 	}
 	return baseValueSet
 }
+// Sync valueset to array, for GPU data generation & mutator
+// Only called at the beginning of setting up the GPU state
+func (vs *ValueSet) SyncArrays(){
+	ints := maps.Values(vs.integers)
+	slices.SortFunc(ints, func(a, b *big.Int) int {
+		return a.Cmp(b)
+	})
+	vs.integersArray = ints
 
+	addrs := maps.Keys(vs.addresses)
+	slices.SortFunc(addrs, func(a, b common.Address) int {
+		return a.Cmp(b)
+	})
+	vs.addressesArray = addrs
+
+	byts := maps.Values(vs.bytes)
+	slices.SortFunc(byts, func(a, b []byte) int {
+		return bytes.Compare(a, b)
+	})
+	vs.bytesArray = byts
+
+	strs := maps.Keys(vs.strings)
+	slices.Sort(strs)
+	vs.stringsArray = strs
+
+}
 // Addresses returns a list of addresses contained within the set.
 func (vs *ValueSet) Addresses() []common.Address {
 	// res := make([]common.Address, len(vs.addresses))
@@ -62,11 +93,12 @@ func (vs *ValueSet) Addresses() []common.Address {
 	//     count++
 	// }
 	// return res
-	addrs := maps.Keys(vs.addresses)
-	slices.SortFunc(addrs, func(a, b common.Address) int {
-		return a.Cmp(b)
-	})
-	return addrs
+	// addrs := maps.Keys(vs.addresses)
+	// slices.SortFunc(addrs, func(a, b common.Address) int {
+	// 	return a.Cmp(b)
+	// })
+	// return addrs
+	return vs.addressesArray
 }
 
 // AddAddress adds an address item to the ValueSet.
@@ -94,11 +126,12 @@ func (vs *ValueSet) Integers() []*big.Int {
 	//     count++
 	// }
 	// return res
-	ints := maps.Values(vs.integers)
-	slices.SortFunc(ints, func(a, b *big.Int) int {
-		return a.Cmp(b)
-	})
-	return ints
+	// ints := maps.Values(vs.integers)
+	// slices.SortFunc(ints, func(a, b *big.Int) int {
+	// 	return a.Cmp(b)
+	// })
+	// return ints
+	return vs.integersArray
 }
 
 // AddInteger adds an integer item to the ValueSet.
@@ -126,9 +159,10 @@ func (vs *ValueSet) Strings() []string {
 	//     count++
 	// }
 	// return res
-	strs := maps.Keys(vs.strings)
-	slices.Sort(strs)
-	return strs
+	// strs := maps.Keys(vs.strings)
+	// slices.Sort(strs)
+	// return strs
+	return vs.stringsArray
 }
 
 // AddString adds a string item to the ValueSet.
@@ -156,11 +190,12 @@ func (vs *ValueSet) Bytes() [][]byte {
 	//     count++
 	// }
 	// return res
-	byts := maps.Values(vs.bytes)
-	slices.SortFunc(byts, func(a, b []byte) int {
-		return bytes.Compare(a, b)
-	})
-	return byts
+	// byts := maps.Values(vs.bytes)
+	// slices.SortFunc(byts, func(a, b []byte) int {
+	// 	return bytes.Compare(a, b)
+	// })
+	// return byts
+	return vs.bytesArray
 }
 
 // AddBytes adds a byte sequence to the ValueSet.

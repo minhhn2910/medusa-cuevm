@@ -1,6 +1,7 @@
 package fuzzing
 
 import (
+	"fmt"
 	"math/big"
 	"sync"
 
@@ -9,6 +10,7 @@ import (
 	"github.com/crytic/medusa/fuzzing/config"
 	"github.com/crytic/medusa/fuzzing/contracts"
 	"github.com/crytic/medusa/fuzzing/coverage"
+	fuzzingutils "github.com/crytic/medusa/fuzzing/utils"
 
 	"golang.org/x/exp/slices"
 )
@@ -242,7 +244,7 @@ func (t *AssertionTestCaseProvider) callSequencePostCallTest(worker *FuzzerWorke
 // GPUPostCallTest provides is a CallSequenceTestFunc that performs post-call testing logic for the attached Fuzzer
 // and any underlying FuzzerWorker. It is called after every call made in a call sequence. It checks whether invariants
 // in methods to test are upheld after each call the Fuzzer makes when testing a call sequence.
-func (t *AssertionTestCaseProvider) GPUPostCallTest(workers []*FuzzerWorker, gpuResult *coverage.GPUExecutionResult, bigIntWeightValue *big.Int) (bool, error) {
+func (t *AssertionTestCaseProvider) GPUPostCallTest(workers []*FuzzerWorker, gpuResult *coverage.GPUExecutionResult, markerOffsets []int32, bigIntWeightValue *big.Int) (bool, error) {
 
 	// var globalShrinkRequestsAdded int32 // 0 for false, 1 for true (atomic)
 	total_calls_tested_per_worker := workers[0].fuzzer.sequencesPerCPUWorker * workers[0].fuzzer.config.Fuzzing.CallSequenceLength
@@ -261,11 +263,13 @@ func (t *AssertionTestCaseProvider) GPUPostCallTest(workers []*FuzzerWorker, gpu
 
 	}
 	skipSequenceSize := t.fuzzer.skipSequenceSize
+	txBatchSizeCPU := t.fuzzer.sequencesPerCPUWorker * t.fuzzer.numCPUWorkers
 	total_bugs_encountered := 0
 	for batchIdx := 0; batchIdx < len(gpuResult.NewBugIndices); batchIdx++ {
 		total_bugs_encountered += len(gpuResult.NewBugIndices[batchIdx])
 		for idx := 0; idx < len(gpuResult.NewBugIndices[batchIdx]); idx++ {
-			rawIdx := int(gpuResult.NewBugIndices[batchIdx][idx])
+			// translate from gpu idx to cpu idx (no skip sequence)
+			rawIdx := int(gpuResult.NewBugIndices[batchIdx][idx]) / skipSequenceSize
 			rawPC := gpuResult.NewBugPCs[batchIdx][idx]
 			workerIdx := rawIdx / t.fuzzer.sequencesPerCPUWorker
 			sequenceIdx := rawIdx % t.fuzzer.sequencesPerCPUWorker
@@ -273,22 +277,71 @@ func (t *AssertionTestCaseProvider) GPUPostCallTest(workers []*FuzzerWorker, gpu
 			fullSequence := make(calls.CallSequence, elementIdx+1)
 			for i := 0; i <= elementIdx; i++ {
 				fullSequence[i], _ = workers[workerIdx].callSequenceElements[sequenceIdx][i].Clone()
-				dataMarkers := workers[workerIdx].callSequenceElements[(sequenceIdx/skipSequenceSize)*skipSequenceSize][i].Call.DataMarkers
-
-				// fmt.Println("CuEVM Debug: dataMarkers", dataMarkers)
-				// fmt.Println("CuEVM Debug: idx", idx, "fullSequence[", i, "]")
-
-				mutatedData := workers[workerIdx].fuzzer.restore_mutation(fullSequence[i].Call.Data, dataMarkers, rawIdx, i)
-				inputData := mutatedData[4:] // skip the method ID
-				inputValues, err := fullSequence[i].Call.DataAbiValues.Method.Inputs.Unpack(inputData)
-				if err != nil {
-					// handle error
+				// Warning i is element index in a squence
+				// Need to reply i when reconstructing the sequence
+				markerOffsetIdx := (rawIdx + i*txBatchSizeCPU)
+				methodSig := fullSequence[i].Call.DataAbiValues.Method.Sig
+				// fmt.Println("CuEVM Debug: markerOffsetIdx", markerOffsetIdx, "methodSig", methodSig, "rawIdx", rawIdx, "i", i)
+				var dataMarkers []calls.DataMarker
+				if markerOffsets[markerOffsetIdx] < 0 {
+					dataMarkers = t.fuzzer.staticABIMarkers[t.fuzzer.staticABIMarkerIndexMap[methodSig]]
+				} else {
+					// fmt.Println("CuEVM Debug: markerOffsets[markerOffsetIdx] (sequenceIdx/f.skipSequenceSize)*f.skipSequenceSize", markerOffsets[markerOffsetIdx], "sequenceIdx", sequenceIdx, "i", i)
+					dataMarkers = workers[workerIdx].callSequenceElements[sequenceIdx][i].Call.DataMarkers
 				}
+				mutatedData, mutatedBlockNumber, mutatedBlockTimestamp, mutatedSenderIndex, mutatedValue := fuzzingutils.RestoreMutation(fullSequence[i].Call.Data, dataMarkers, int(gpuResult.NewBugIndices[batchIdx][idx]), i, fuzzingutils.FuzzerConfig{
+					LoopCounter:            t.fuzzer.loopCounter,
+					NumInstancesPerDevice:  t.fuzzer.numInstancesPerDevice,
+					AddressConstants:       t.fuzzer.addressConstants,
+					IntegerConstants:       t.fuzzer.integerConstants,
+					BlockNumberDelayMax:    60480, // hardcode for now
+					BlockTimestampDelayMax: 604800,
+					SenderCount:            uint32(len(t.fuzzer.senders)),
+				})
+
+				// Apply mutated block values if they were changed (non-zero)
+
+				if mutatedBlockNumber >= 0 {
+					fullSequence[i].BlockNumberDelay = uint64(mutatedBlockNumber)
+				}
+				if mutatedBlockTimestamp >= 0 {
+					fullSequence[i].BlockTimestampDelay = uint64(mutatedBlockTimestamp)
+				}
+
+				if mutatedSenderIndex >= 0 {
+					fullSequence[i].Call.From = t.fuzzer.senders[mutatedSenderIndex]
+				}
+
+				// Apply mutated value if it was changed (non-zero)
+
+				fullSequence[i].Call.Value = mutatedValue
+				var inputValues []any
+				var err error
+				if len(mutatedData) >= 4 {
+					if fullSequence[i].Call.DataAbiValues.Method.Sig != "CuEVM::fallback()" {
+						inputData := mutatedData[4:] // skip the method ID
+						inputValues, err = fullSequence[i].Call.DataAbiValues.Method.Inputs.Unpack(inputData)
+					} else {
+						inputValues, err = fullSequence[i].Call.DataAbiValues.Method.Inputs.Unpack(mutatedData)
+					}
+
+					if err != nil {
+						fmt.Println("\n\nCuEVM Debug: inputValues unpack error\n\n", err)
+					}
+				} else {
+					fmt.Println("\n\nCuEVM Debug: inputValues empty\n\n")
+					inputValues = []any{}
+				}
+
 				// fmt.Println("CuEVM debug original data ", hex.EncodeToString(fullSequence[i].Call.Data))
 				fullSequence[i].Call.DataAbiValues.InputValues = inputValues
 				fullSequence[i].Call.Data = mutatedData
 				// fmt.Println("CuEVM debug mutated data ", hex.EncodeToString(mutatedData))
 				// fmt.Println("CuEVM debug new inputValues", inputValues)
+				// fmt.Println("CuEVM debug mutated sender index", mutatedSenderIndex)
+				// fmt.Println("CuEVM debug mutated value", mutatedValue)
+				// fmt.Println("CuEVM debug mutated block number", mutatedBlockNumber)
+				// fmt.Println("CuEVM debug mutated block timestamp", mutatedBlockTimestamp)
 
 				// fmt.Println("Call element", fullSequence[i])
 			}
@@ -357,6 +410,7 @@ func (t *AssertionTestCaseProvider) GPUPostCallTest(workers []*FuzzerWorker, gpu
 		worker := workers[workerIdx]
 		if len(newShrinkRequests[workerIdx]) > 0 {
 			worker.pendingShrinkRequests = append(worker.pendingShrinkRequests, newShrinkRequests[workerIdx]...)
+
 		}
 		// fmt.Println("CuEVM Debug: workerIdx", workerIdx, "pendingShrinkRequests", len(worker.pendingShrinkRequests))
 	}

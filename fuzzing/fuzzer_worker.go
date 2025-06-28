@@ -9,6 +9,7 @@ import (
 
 	"github.com/crytic/medusa/logging/colors"
 
+	"github.com/crytic/medusa-geth/accounts/abi"
 	"github.com/crytic/medusa-geth/common"
 	"github.com/crytic/medusa/chain"
 	"github.com/crytic/medusa/fuzzing/calls"
@@ -98,6 +99,7 @@ type FuzzerWorker struct {
 	staticABICallElementCache  map[string][]byte
 	staticABIDataABIValues     map[string]calls.CallMessageDataAbiValues
 	staticABIMarkerOffsetCache map[string]int
+	signatureToMethodMap       map[string]*fuzzerTypes.DeployedContractMethod
 }
 
 // newFuzzerWorker creates a new FuzzerWorker, assigning it the provided worker index/id and associating it to the
@@ -141,6 +143,46 @@ func newFuzzerWorker(fuzzer *Fuzzer, workerIndex int, randomProvider *rand.Rand)
 	worker.shrinkWg.Add(1)
 	go worker.shrinkCallSequenceAsyncLoop()
 	return worker, nil
+}
+
+func (fw *FuzzerWorker) initializeABICache() {
+	fmt.Println("CuEVM Debug: constructing staticABICallElementCache")
+
+	for i := 0; i < len(fw.fuzzer.staticABICallData); i++ {
+		clonedData := make([]byte, len(fw.fuzzer.staticABICallData[i]))
+		copy(clonedData, fw.fuzzer.staticABICallData[i])
+		fw.staticABICallElementCache[fw.fuzzer.staticABISignature[i]] = clonedData
+		fw.staticABIMarkerOffsetCache[fw.fuzzer.staticABISignature[i]] = int(fw.fuzzer.staticABIMarkerOffset[i])
+		if clonedVal, err := fw.fuzzer.staticABIDataABIValues[i].Clone(); err == nil && clonedVal != nil {
+			fw.staticABIDataABIValues[fw.fuzzer.staticABISignature[i]] = *clonedVal
+		} else {
+			// Handle error or nil case if needed, or log
+			fmt.Println("CuEVM Debug: error cloning ABI value", err)
+		}
+	}
+	// setup mapping from signature to method
+	fw.signatureToMethodMap = make(map[string]*fuzzerTypes.DeployedContractMethod)
+	for _, method := range fw.stateChangingMethods {
+		fw.signatureToMethodMap[method.Method.Sig] = &method
+	}
+	for _, method := range fw.pureMethods {
+		fw.signatureToMethodMap[method.Method.Sig] = &method
+	}
+
+	// Pre-allocate callSequenceElements for reuse
+	fw.callSequenceElements = make([][]*calls.CallSequenceElement, fw.fuzzer.sequencesPerCPUWorker)
+	for i := range fw.callSequenceElements {
+		fw.callSequenceElements[i] = make([]*calls.CallSequenceElement, fw.fuzzer.config.Fuzzing.CallSequenceLength)
+	}
+
+	fmt.Println("CuEVM Debug: staticABICallElementCache", fw.staticABICallElementCache)
+	fmt.Println("CuEVM Debug: staticABIMarkerOffsetCache", fw.staticABIMarkerOffsetCache)
+	fmt.Println("CuEVM Debug: staticABIDataABIValues", fw.staticABIDataABIValues)
+	for sig, data := range fw.staticABIDataABIValues {
+		fmt.Println("CuEVM Debug: sig", sig, "data", data.InputValues)
+	}
+	fmt.Println("CuEVM Debug: signatureToMethodMap", fw.signatureToMethodMap)
+	fmt.Println("\n\nCuEVM Debug: end of initializeABICache\n\n")
 }
 
 // The async loop (only one per worker):
@@ -296,9 +338,15 @@ func (fw *FuzzerWorker) updateMethods() {
 
 	// Loop through each deployed contract
 	for contractAddress, contractDefinition := range fw.deployedContracts {
+		fmt.Println("CuEVM Debug: contractAddress", contractAddress)
+		fmt.Println("CuEVM Debug: contractDefinition", contractDefinition.CompiledContract().Abi)
+
 		// If we deployed the contract, also enumerate property tests and state changing methods.
 		for _, method := range contractDefinition.AssertionTestMethods {
 			// Any non-constant method should be tracked as a state changing method.
+			fmt.Println("CuEVM Debug: method", method)
+			fmt.Println("CuEVM Debug: method.IsConstant()", method.IsConstant())
+			fmt.Println("CuEVM Debug: method.IsPayable()", method.IsPayable())
 			if method.IsConstant() {
 				// Only track the pure/view method if testing view methods is enabled
 				if fw.fuzzer.config.Fuzzing.Testing.TestViewMethods {
@@ -308,6 +356,21 @@ func (fw *FuzzerWorker) updateMethods() {
 				fw.stateChangingMethods = append(fw.stateChangingMethods, fuzzerTypes.DeployedContractMethod{Address: contractAddress, Contract: contractDefinition, Method: method})
 			}
 		}
+		fallback := contractDefinition.CompiledContract().Abi.Fallback
+		fallback.Name = "fallback"
+		fallback.Sig = "CuEVM::fallback()"
+		newtype, _ := abi.NewType("uint256", "", []abi.ArgumentMarshaling{})
+		fallback.Inputs = abi.Arguments{abi.Argument{
+			Name: "input",
+			Type: newtype,
+		}}
+		fallback.Payable = true
+		// this one represent both fallback and receive
+
+		// Add them to "pureMethods" for less frequent mutation
+		fw.pureMethods = append(fw.pureMethods, fuzzerTypes.DeployedContractMethod{Address: contractAddress, Contract: contractDefinition, Method: fallback})
+		// fw.pureMethods = append(fw.pureMethods, fuzzerTypes.DeployedContractMethod{Address: contractAddress, Contract: contractDefinition, Method: receive})
+
 	}
 
 	// CuEVM Debug: sort methods by name for deterministic order
@@ -352,7 +415,7 @@ func (fw *FuzzerWorker) testNextCallSequence() ([]ShrinkCallSequenceRequest, err
 
 	// Our "fetch next call" method will generate new calls as needed, if we are generating a new sequence.
 	fetchElementFunc := func(currentIndex int) (*calls.CallSequenceElement, error) {
-		return fw.sequenceGenerator.PopSequenceElement(false)
+		return fw.sequenceGenerator.PopSequenceElement()
 	}
 
 	// Our "post execution check function" method will check coverage and call all testing functions. If one returns a
@@ -508,12 +571,12 @@ func (fw *FuzzerWorker) shrinkCallSequence(shrinkRequest ShrinkCallSequenceReque
 	// for _, element := range optimizedSequence {
 	// 	element.Call.FillFromTestChainProperties(fw.chain)
 	// }
-	fmt.Println("CuEVM Debug: shrinkCallSequence start")
+	fmt.Println("CuEVM Debug: shrinkCallSequence start, shrinkLimit", fw.fuzzer.config.Fuzzing.ShrinkLimit)
 	// Obtain our shrink limits and begin shrinking.
 	shrinkIteration := uint64(0)
-	shrinkLimit := fw.fuzzer.config.Fuzzing.ShrinkLimit
+	// shrinkLimit := fw.fuzzer.config.Fuzzing.ShrinkLimit
 	// TODO: March 2025 temporarily disable shrinking, todo: reenable
-	// shrinkLimit := uint64(0)
+	shrinkLimit := uint64(0)
 	shrinkingEnded := func() bool {
 		return shrinkIteration >= shrinkLimit || utils.CheckContextDone(fw.fuzzer.emergencyCtx)
 	}

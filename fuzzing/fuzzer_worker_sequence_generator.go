@@ -277,8 +277,13 @@ func (g *CallSequenceGenerator) seedSequenceElementCache() {
 	selectedSender := g.worker.fuzzer.senders[g.worker.randomProvider.Intn(len(g.worker.fuzzer.senders))]
 	big_one := big.NewInt(1)
 	big_zero := big.NewInt(0)
+	g.worker.fuzzer.normalizedSigCache = make(map[string]string)
 	markerOffset := 0
 	for _, method := range g.worker.stateChangingMethods {
+		fmt.Println("CuEVM Debug: method signature", method.Method.Sig)
+		fmt.Println("CuEVM Debug: method", method.Method)
+		normalizedSig := normalizeSignature(method.Method.Sig)
+		g.worker.fuzzer.normalizedSigCache[normalizedSig] = method.Method.Sig
 		isDynamic := hasDynamicEncoding(method.Method.Sig)
 		if isDynamic {
 			g.worker.fuzzer.signatureDynamicEncoding = append(g.worker.fuzzer.signatureDynamicEncoding, method.Method.Sig)
@@ -336,6 +341,10 @@ func (g *CallSequenceGenerator) seedSequenceElementCache() {
 	}
 
 	for _, method := range g.worker.pureMethods {
+		fmt.Println("CuEVM Debug: pure method", method.Method.Name, "payable", method.Method.Payable, "rawName", method.Method.RawName, "sig", method.Method.Sig)
+		fmt.Println("CuEVM Debug: pure method signature", method.Method.Sig, method.Method.Sig == "")
+		normalizedSig := normalizeSignature(method.Method.Sig)
+		g.worker.fuzzer.normalizedSigCache[normalizedSig] = method.Method.Sig
 		isDynamic := hasDynamicEncoding(method.Method.Sig)
 		if isDynamic {
 			g.worker.fuzzer.signatureDynamicEncoding = append(g.worker.fuzzer.signatureDynamicEncoding, method.Method.Sig)
@@ -396,13 +405,114 @@ func (g *CallSequenceGenerator) seedSequenceElementCache() {
 		g.worker.fuzzer.staticABIMarkerIndexMap[method.Method.Sig] = len(g.worker.fuzzer.staticABISignature) - 1
 	}
 
+	normalizedSigCache := g.worker.fuzzer.normalizedSigCache
+	// add fallback
+	normalizedSigCache["()"] = "CuEVM::fallback()"
+	normalizedSigCache["fallback()"] = "CuEVM::fallback()"
+	normalizedSigCache["receive()"] = "CuEVM::fallback()"
+
+	g.worker.fuzzer.functionImpactsCache = make(map[string][]string)
+	g.worker.fuzzer.functionIsImpactedCache = make(map[string][]string)
+	g.worker.fuzzer.functionsWithImpactsCache = make([]string, 0)
+	allContractNames := make([]string, 0)
+	for contractName := range g.worker.fuzzer.slitherResults.FunctionRelations {
+		allContractNames = append(allContractNames, contractName)
+	}
+	fmt.Println("CuEVM Debug: allContractNames", allContractNames)
+	functionIsConstructor := func(functionName string) bool {
+		for _, contractName := range allContractNames {
+			if strings.HasPrefix(functionName, contractName+"(") {
+				return true
+			}
+		}
+		if strings.HasPrefix(functionName, "constructor(") {
+			return true
+		}
+		return false
+	}
+	for contractName, relations := range g.worker.fuzzer.slitherResults.FunctionRelations {
+		fmt.Println("\n\nCuEVM Debug: contractName", contractName)
+		for _, rel := range relations {
+
+			if functionIsConstructor(rel.Function) || normalizedSigCache[rel.Function] == "" {
+				fmt.Println("CuEVM Debug: skip constructor", rel.Function)
+				continue
+			}
+			methodSig := g.worker.fuzzer.normalizedSigCache[rel.Function]
+
+			// Cache impacts
+			if len(rel.Impacts) > 0 {
+				for _, impact := range rel.Impacts {
+					if functionIsConstructor(impact) {
+						fmt.Println("CuEVM Debug: skip constructor", impact)
+						continue
+					}
+					fmt.Println("CuEVM Debug: impact", impact, "methodSig", methodSig, "normalizedSigCache", normalizedSigCache[impact])
+					if normalizedSigCache[impact] == "" {
+						fmt.Println("CuEVM Debug: normalizedSigCache[impact] is empty", impact)
+						continue
+					}
+					g.worker.fuzzer.functionImpactsCache[methodSig] = append(g.worker.fuzzer.functionImpactsCache[methodSig], normalizedSigCache[impact])
+				}
+				g.worker.fuzzer.functionsWithImpactsCache = append(g.worker.fuzzer.functionsWithImpactsCache, methodSig)
+			}
+
+			// Cache isImpactedBy
+			if len(rel.IsImpactedBy) > 0 {
+				for _, impacted := range rel.IsImpactedBy {
+					if functionIsConstructor(impacted) {
+						fmt.Println("CuEVM Debug: skip constructor", impacted)
+						continue
+					}
+					fmt.Println("CuEVM Debug: impacted", impacted, "methodSig", methodSig, "normalizedSigCache", normalizedSigCache[impacted])
+					if normalizedSigCache[impacted] == "" {
+						fmt.Println("CuEVM Debug: normalizedSigCache[impacted] is empty", impacted)
+						continue
+					}
+					g.worker.fuzzer.functionIsImpactedCache[methodSig] = append(g.worker.fuzzer.functionIsImpactedCache[methodSig], normalizedSigCache[impacted])
+				}
+			}
+		}
+	}
+	// Print comprehensive cache debugging information
+	fmt.Println("\n=== Cache Summary ===")
+	fmt.Printf("Total normalized signatures cached: %d\n", len(g.worker.fuzzer.normalizedSigCache))
+	fmt.Printf("Total function impacts cached: %d\n", len(g.worker.fuzzer.functionImpactsCache))
+	fmt.Printf("Total function isImpactedBy cached: %d\n", len(g.worker.fuzzer.functionIsImpactedCache))
+	fmt.Printf("Total functions with impacts: %d\n", len(g.worker.fuzzer.functionsWithImpactsCache))
+
+	fmt.Println("\n=== Normalized Signature Cache ===")
+	for original, normalized := range g.worker.fuzzer.normalizedSigCache {
+		fmt.Printf("  %s -> %s\n", original, normalized)
+	}
+
+	fmt.Println("\n=== Functions With Impacts Cache ===")
+	for i, method := range g.worker.fuzzer.functionsWithImpactsCache {
+		fmt.Printf("  [%d] %s\n", i, method)
+	}
+
+	fmt.Println("\n=== Function Impacts Cache ===")
+	for cacheKey, impacts := range g.worker.fuzzer.functionImpactsCache {
+		fmt.Printf("  %s -> %v\n", cacheKey, impacts)
+	}
+
+	fmt.Println("\n=== Function IsImpactedBy Cache ===")
+	for cacheKey, isImpactedBy := range g.worker.fuzzer.functionIsImpactedCache {
+		fmt.Printf("  %s -> %v\n", cacheKey, isImpactedBy)
+	}
+
+	fmt.Println("\n=== Cache Validation ===")
+	// Validate cache consistency
+	totalCacheEntries := len(g.worker.fuzzer.functionImpactsCache) + len(g.worker.fuzzer.functionIsImpactedCache)
+	fmt.Printf("Total cache entries: %d\n", totalCacheEntries)
+
 	fmt.Println("\n\nCuEVM Debug: end seedSequenceElementCache\n\n")
 
 }
 
 // PopSequenceElement obtains the next element for our call sequence requested by InitializeNextSequence. If there are no elements
 // left to return, this method returns nil. If an error occurs, it is returned instead.
-func (g *CallSequenceGenerator) PopSequenceElement(isFirstSequence bool) (*calls.CallSequenceElement, error) {
+func (g *CallSequenceGenerator) PopSequenceElement() (*calls.CallSequenceElement, error) {
 	// If the call sequence length is zero, there is no work to be done.
 	if g.fetchIndex >= len(g.baseSequence) {
 		return nil, nil
@@ -421,27 +531,15 @@ func (g *CallSequenceGenerator) PopSequenceElement(isFirstSequence bool) (*calls
 		if g.worker.randomProvider.Float32() < g.config.FunctionRelationBias {
 			// fmt.Println("\nCuEVM Debug: use function relation")
 			if g.generateFromTail {
+				// fmt.Println("CuEVM Debug: generateFromTail")
 				for _, elem := range g.baseSequence[g.fetchIndex:] {
 					if elem == nil {
 						continue
 					}
-					contractName := elem.Contract.Name()
-					functionName := elem.Call.DataAbiValues.Method.Sig
 
-					// Find relations for this contract
-					relations, ok := g.worker.fuzzer.slitherResults.FunctionRelations[contractName]
-					if !ok {
-						continue
-					}
-					// Find the relation for this function
-					for _, rel := range relations {
-						if normalizeSignature(rel.Function) == normalizeSignature(functionName) {
-							// Add all impacted functions to the pool
-							for _, impacted := range rel.IsImpactedBy {
-								pool = append(pool, impacted)
-							}
-						}
-					}
+					// fmt.Println("CuEVM Debug:", elem.Call.DataAbiValues.Method.Sig, "is impacted by", g.worker.fuzzer.functionIsImpactedCache[elem.Call.DataAbiValues.Method.Sig])
+					pool = append(pool, g.worker.fuzzer.functionIsImpactedCache[elem.Call.DataAbiValues.Method.Sig]...)
+
 				}
 			} else {
 				if g.fetchIndex != 0 {
@@ -452,37 +550,15 @@ func (g *CallSequenceGenerator) PopSequenceElement(isFirstSequence bool) (*calls
 						if elem == nil {
 							continue
 						}
-						contractName := elem.Contract.Name()
-						functionName := elem.Call.DataAbiValues.Method.Sig
-						// fmt.Println("CuEVM Debug: functionName", functionName)
-						// Find relations for this contract
-						relations, ok := g.worker.fuzzer.slitherResults.FunctionRelations[contractName]
 
-						if !ok {
-							continue
-						}
-						// Find the relation for this function
-						for _, rel := range relations {
-							if normalizeSignature(rel.Function) == normalizeSignature(functionName) {
-								// fmt.Println("CuEVM Debug: rel.Function", rel.Function)
-								// Add all impacted functions to the pool
-								for _, impacted := range rel.Impacts {
-									pool = append(pool, impacted)
-								}
-							}
-						}
+						// fmt.Println("CuEVM Debug:" ,elem.Call.DataAbiValues.Method.Sig, " impacts", g.worker.fuzzer.functionImpactsCache[elem.Call.DataAbiValues.Method.Sig])
+						pool = append(pool, g.worker.fuzzer.functionImpactsCache[elem.Call.DataAbiValues.Method.Sig]...)
+
 					}
 
 				} else {
 					// first element, we pick from the methods having Impacts
-					for _, elem := range g.worker.fuzzer.slitherResults.FunctionRelations {
-						for _, rel := range elem {
-							if len(rel.Impacts) > 0 {
-								// fmt.Println("CuEVM Debug: rel.Function", rel.Function)
-								pool = append(pool, rel.Function)
-							}
-						}
-					}
+					pool = g.worker.fuzzer.functionsWithImpactsCache
 				}
 			}
 		}
@@ -494,6 +570,7 @@ func (g *CallSequenceGenerator) PopSequenceElement(isFirstSequence bool) (*calls
 		}
 		element = elementWithMask
 
+		g.baseSequence[g.fetchIndex] = element
 		// Debug print the masks
 
 		// fmt.Printf("CuEVM Debug: Method: %s\n", elementWithMask)
@@ -504,93 +581,14 @@ func (g *CallSequenceGenerator) PopSequenceElement(isFirstSequence bool) (*calls
 		// our call prior to return. This allows mutations to be applied on a per-call time frame, rather than
 		// per-sequence, making use of the most recent runtime data.
 		// fmt.Println("CuEVM Debug: Element is not nil ", g.prefetchModifyCallFunc)
-		if g.prefetchModifyCallFunc != nil {
-			// fmt.Println("CuEVM Debug: prefetchModifyCallFunc", g.prefetchModifyCallFunc)
-			// fmt.Println("CuEVM Debug: element", element)
-			var new_element, err = element.Clone()
-			if err != nil {
-				fmt.Println("CuEVM Debug: element Clone err", err)
-				return nil, err
-			}
-			err = g.prefetchModifyCallFunc(g, new_element)
-			element = new_element
-			// fmt.Println("CuEVM Debug: prefetchModifyCallFunc err", err)
-			// fmt.Println("CuEVM Debug: element", element)
-			// fmt.Println("CuEVM Debug: element after prefetchModifyCallFunc", new_element)
-			if err != nil {
-				return nil, err
-			}
-		} else {
-
-			// CUEVM modify
-			// If this is a payable function, generate value to send
-			var value = big.NewInt(0)
-			selectedMethod := element.Call.DataAbiValues.Method
-			if selectedMethod.StateMutability == "payable" {
-				value = g.config.ValueGenerator.GenerateInteger(false, 64)
-			}
-			// Generate fuzzed parameters for the function call
-			// args := make([]any, len(selectedMethod.Inputs))
-			// for i := 0; i < len(args); i++ {
-			// 	// Create our fuzzed parameters.
-			// 	input := selectedMethod.Inputs[i]
-			// 	args[i] = valuegeneration.GenerateAbiValue(g.config.ValueGenerator, &input.Type)
-			// }
-			// CUEVM debug perf , disable value mutation
-			big_one := big.NewInt(1)
-			big_zero := big.NewInt(0)
-			args := element.Call.DataAbiValues.InputValues
-			selectedContract := element.Contract
-
-			// TODO: adjust this if needed
-			blockNumberDelay := uint64(0)
-			blockTimestampDelay := uint64(0)
-			if g.worker.fuzzer.config.Fuzzing.MaxBlockNumberDelay > 0 {
-				blockNumberDelay = g.config.ValueGenerator.GenerateInteger(false, 64).Uint64() % (g.worker.fuzzer.config.Fuzzing.MaxBlockNumberDelay + 1)
-			}
-			if g.worker.fuzzer.config.Fuzzing.MaxBlockTimestampDelay > 0 {
-				blockTimestampDelay = g.config.ValueGenerator.GenerateInteger(false, 64).Uint64() % (g.worker.fuzzer.config.Fuzzing.MaxBlockTimestampDelay + 1)
-			}
-			selectedSender := g.worker.fuzzer.senders[g.worker.randomProvider.Intn(len(g.worker.fuzzer.senders))]
-
-			// For each block we jump, we need a unique time stamp for chain semantics, so if our block number jump is too small,
-			// while our timestamp jump is larger, we cap it.
-			if blockNumberDelay > blockTimestampDelay {
-				if blockTimestampDelay == 0 {
-					blockNumberDelay = 0
-				} else {
-					blockNumberDelay %= blockTimestampDelay
-				}
-			}
-			var msg *calls.CallMessage
-
-			if g.worker.staticABICallElementCache[selectedMethod.Sig] != nil {
-				// fmt.Println("\n\nUsing cached static ABI call element", selectedMethod.Sig)
-				abiValues := g.worker.staticABIDataABIValues[selectedMethod.Sig]
-				msg = calls.NewCallMessageWithData(selectedSender, element.Call.To, 0, value, g.worker.fuzzer.config.Fuzzing.TransactionGasLimit, big_one, big_zero, big_zero, g.worker.staticABICallElementCache[selectedMethod.Sig], &abiValues)
-				msg.DataMarkers = nil
-			} else {
-				// TODO: not 100% static, have to check
-				msg = calls.NewCallMessageWithAbiValueData(selectedSender, element.Call.To, 0, value, g.worker.fuzzer.config.Fuzzing.TransactionGasLimit, big_one, big_zero, big_zero, &calls.CallMessageDataAbiValues{
-					Method:      selectedMethod,
-					InputValues: args,
-				})
-
-			}
-
-			if isFirstSequence {
-				msg.DataMarkers = element.Call.DataMarkers
-			}
-			element = calls.NewCallSequenceElement(selectedContract, msg, blockNumberDelay, blockTimestampDelay)
-		}
-
+		// CuEVM: we don't need to modify the call, we will mutate on GPU side
 	}
 
 	// Update the element with the current nonce for the associated chain.
 	// element.Call.FillFromTestChainProperties(g.worker.chain)
 
 	// Update our base sequence, advance our position, and return the processed element from this round.
-	g.baseSequence[g.fetchIndex] = element
+
 	// fmt.Println("CuEVM Debug: PopSequenceElement - element", element)
 	g.fetchIndex++
 	return element, nil
@@ -698,62 +696,51 @@ func (g *CallSequenceGenerator) generateNewElementWithMutationMask(candidate_poo
 	if len(g.worker.stateChangingMethods) == 0 && len(g.worker.pureMethods) > 0 {
 		callOnlyPureFunctions = true
 	}
-
 	// Select a random method
 	// There is a 1/1000 chance that a pure method will be invoked or if there are only pure functions that are callable
 	var selectedMethod *contracts.DeployedContractMethod
 	if len(candidate_pool) > 0 {
-		// select a random candidate from the pool
-		selectedCandidate := candidate_pool[g.worker.randomProvider.Intn(len(candidate_pool))]
 
-		found_method := false
-		for _, method := range g.worker.stateChangingMethods {
-			// fmt.Println("CuEVM Debug: method.Method.Sig", method.Method.Sig)
-			if normalizeSignature(method.Method.Sig) == normalizeSignature(selectedCandidate) {
-				selectedMethod = &method
-				found_method = true
-				break
-			}
-		}
-		if !found_method {
-			for _, method := range g.worker.pureMethods {
-				if normalizeSignature(method.Method.Sig) == normalizeSignature(selectedCandidate) {
-					selectedMethod = &method
-					found_method = true
-					break
-				}
-			}
-		}
-		// fmt.Println("CuEVM Debug: found_method", found_method)
-		if !found_method {
-			selectedMethod = &g.worker.stateChangingMethods[g.worker.randomProvider.Intn(len(g.worker.stateChangingMethods))]
-		}
+		// select a random candidate from the pool
+		selectedSig := candidate_pool[g.worker.randomProvider.Intn(len(candidate_pool))]
+		selectedMethod = g.worker.signatureToMethodMap[selectedSig]
+		fmt.Println("CuEVM Debug: selectedMethod from pool", selectedMethod)
+		fmt.Println("CuEVM Debug: selectedMethod.Method.Sig from pool", selectedMethod.Method.Sig)
 	} else {
 		// CuEVM: many txs in paralel so we can afford to increase this chance
-		if (len(g.worker.pureMethods) > 0 && g.worker.randomProvider.Intn(100) == 1) || callOnlyPureFunctions {
+		if (len(g.worker.pureMethods) > 0 && g.worker.randomProvider.Intn(200) == 1) || callOnlyPureFunctions {
 			// if (len(g.worker.pureMethods) > 0 && g.worker.randomProvider.Intn(1000) == 0) || callOnlyPureFunctions {
 			selectedMethod = &g.worker.pureMethods[g.worker.randomProvider.Intn(len(g.worker.pureMethods))]
+			if selectedMethod.Method.Sig == "CuEVM::fallback()" && (g.worker.randomProvider.Intn(20) != 1) {
+				// lower chance to select fallback
+				selectedMethod = &g.worker.pureMethods[g.worker.randomProvider.Intn(len(g.worker.pureMethods))]
+			}
 		} else {
 			selectedMethod = &g.worker.stateChangingMethods[g.worker.randomProvider.Intn(len(g.worker.stateChangingMethods))]
 		}
+
 	}
 
+	// fmt.Println("CuEVM Debug: selectedMethod", selectedMethod)
+	// fmt.Println("CuEVM Debug: selectedMethod.Method.Sig", selectedMethod.Method.Sig)
 	// Select a random sender
 	selectedSender := g.worker.fuzzer.senders[g.worker.randomProvider.Intn(len(g.worker.fuzzer.senders))]
 	// If this is a payable function, generate value to send
 	var value *big.Int
 	value = big.NewInt(0)
-	if selectedMethod.Method.StateMutability == "payable" {
-		value = g.config.ValueGenerator.GenerateInteger(false, 64)
-	}
+
+	// if selectedMethod.Method.StateMutability == "payable" {
+	// 	value = g.config.ValueGenerator.GenerateInteger(false, 64)
+	// }
 	big_one := big.NewInt(1)
 	big_zero := big.NewInt(0)
 	var msg *calls.CallMessage
 	var masks []calls.DataMarker
 
-	if g.worker.staticABICallElementCache[selectedMethod.Method.Sig] != nil {
+	cachedCallData, exists := g.worker.staticABICallElementCache[selectedMethod.Method.Sig]
+	if exists {
 		// fmt.Println("\n\nUsing cached static ABI call element", selectedMethod.Method.Sig)
-		abiValues := g.worker.staticABIDataABIValues[selectedMethod.Method.Sig]
+		abiValues := g.worker.staticABIDataABIValues[selectedMethod.Method.Sig] // must exist
 		msg = calls.NewCallMessageWithData(
 			selectedSender,
 			&selectedMethod.Address,
@@ -763,7 +750,7 @@ func (g *CallSequenceGenerator) generateNewElementWithMutationMask(candidate_poo
 			big_one,
 			big_zero,
 			big_zero,
-			g.worker.staticABICallElementCache[selectedMethod.Method.Sig],
+			cachedCallData,
 			&abiValues,
 		)
 		masks = nil
@@ -815,22 +802,22 @@ func (g *CallSequenceGenerator) generateNewElementWithMutationMask(candidate_poo
 	// Determine our delay values for this element
 	blockNumberDelay := uint64(0)
 	blockTimestampDelay := uint64(0)
-	if g.worker.fuzzer.config.Fuzzing.MaxBlockNumberDelay > 0 {
-		blockNumberDelay = g.config.ValueGenerator.GenerateInteger(false, 64).Uint64() % (g.worker.fuzzer.config.Fuzzing.MaxBlockNumberDelay + 1)
-	}
-	if g.worker.fuzzer.config.Fuzzing.MaxBlockTimestampDelay > 0 {
-		blockTimestampDelay = g.config.ValueGenerator.GenerateInteger(false, 64).Uint64() % (g.worker.fuzzer.config.Fuzzing.MaxBlockTimestampDelay + 1)
-	}
+	// if g.worker.fuzzer.config.Fuzzing.MaxBlockNumberDelay > 0 {
+	// 	blockNumberDelay = g.config.ValueGenerator.GenerateInteger(false, 64).Uint64() % (g.worker.fuzzer.config.Fuzzing.MaxBlockNumberDelay + 1)
+	// }
+	// if g.worker.fuzzer.config.Fuzzing.MaxBlockTimestampDelay > 0 {
+	// 	blockTimestampDelay = g.config.ValueGenerator.GenerateInteger(false, 64).Uint64() % (g.worker.fuzzer.config.Fuzzing.MaxBlockTimestampDelay + 1)
+	// }
 
 	// For each block we jump, we need a unique time stamp for chain semantics, so if our block number jump is too small,
 	// while our timestamp jump is larger, we cap it.
-	if blockNumberDelay > blockTimestampDelay {
-		if blockTimestampDelay == 0 {
-			blockNumberDelay = 0
-		} else {
-			blockNumberDelay %= blockTimestampDelay
-		}
-	}
+	// if blockNumberDelay > blockTimestampDelay {
+	// 	if blockTimestampDelay == 0 {
+	// 		blockNumberDelay = 0
+	// 	} else {
+	// 		blockNumberDelay %= blockTimestampDelay
+	// 	}
+	// }
 
 	// Return our call sequence element and masks.
 	return calls.NewCallSequenceElement(selectedMethod.Contract, msg, blockNumberDelay, blockTimestampDelay), masks, nil
