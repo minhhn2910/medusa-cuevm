@@ -30,6 +30,9 @@ type CryticCompilationConfig struct {
 
 	// Args are additional arguments that can be provided to `crytic-compile`
 	Args []string `json:"args"`
+
+	// SkipSolcInstall is a flag to skip the installation, this assumes that the solc version is already installed by solc-select
+	SkipSolcInstall bool `json:"skipSolcInstall"`
 }
 
 // Platform returns the platform type
@@ -119,11 +122,14 @@ func (c *CryticCompilationConfig) Compile() ([]types.Compilation, string, error)
 
 	// Install a specific `solc` version if requested in the config
 	if c.SolcVersion != "" {
-		out, err := exec.Command("solc-select", "install", c.SolcVersion).CombinedOutput()
-		if err != nil {
-			return nil, "", fmt.Errorf("error while executing `solc-select install`:\nOUTPUT:\n%s\nERROR: %s\n", string(out), err.Error())
+		if !c.SkipSolcInstall{
+			out, err := exec.Command("solc-select", "install", c.SolcVersion).CombinedOutput()
+			if err != nil {
+				return nil, "", fmt.Errorf("error while executing `solc-select install`:\nOUTPUT:\n%s\nERROR: %s\n", string(out), err.Error())
+			}
 		}
-		out, err = exec.Command("solc-select", "use", c.SolcVersion).CombinedOutput()
+
+		out, err := exec.Command("solc-select", "use", c.SolcVersion).CombinedOutput()
 		if err != nil {
 			return nil, "", fmt.Errorf("error while executing `solc-select use`:\nOUTPUT:\n%s\nERROR: %s\n", string(out), err.Error())
 		}
