@@ -502,7 +502,7 @@ func (f *Fuzzer) AddCompilationTargets(compilations []compilationTypes.Compilati
 		f.slitherResults = slitherResults
 		// Seed our base value set with the constants extracted by Slither
 		f.baseValueSet.SeedFromSlither(slitherResults)
-
+		sender_set := make(map[common.Address]bool)
 		// CuEVM add address constants to sender list
 		for _, constant := range slitherResults.Constants {
 			if constant.Type == "address" {
@@ -511,7 +511,10 @@ func (f *Fuzzer) AddCompilationTargets(compilations []compilationTypes.Compilati
 				if err != nil {
 					f.logger.Warn("Failed to convert constant to address", err)
 				}
-				f.senders = append(f.senders, address)
+				if !sender_set[address] {
+					f.senders = append(f.senders, address)
+					sender_set[address] = true
+				}
 			}
 		}
 	}
@@ -989,10 +992,10 @@ func (f *Fuzzer) spawnWorkersLoop(baseTestChain *chain.TestChain) error {
 
 		}
 		if f.forkMode && len(f.pendingEvents) > 0 {
+			fmt.Println("CuEVM Debug: pendingEvents in worker chain creation", len(f.pendingEvents))
 			for _, event := range f.pendingEvents {
 				worker.chain.Events.ContractDeploymentAddedEventEmitter.Publish(event)
 			}
-			f.pendingEvents = nil
 		}
 
 	}
