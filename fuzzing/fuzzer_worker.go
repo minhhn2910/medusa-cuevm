@@ -175,13 +175,13 @@ func (fw *FuzzerWorker) initializeABICache() {
 		fw.callSequenceElements[i] = make([]*calls.CallSequenceElement, fw.fuzzer.config.Fuzzing.CallSequenceLength)
 	}
 
-	fmt.Println("CuEVM Debug: staticABICallElementCache", fw.staticABICallElementCache)
-	fmt.Println("CuEVM Debug: staticABIMarkerOffsetCache", fw.staticABIMarkerOffsetCache)
-	fmt.Println("CuEVM Debug: staticABIDataABIValues", fw.staticABIDataABIValues)
-	for sig, data := range fw.staticABIDataABIValues {
-		fmt.Println("CuEVM Debug: sig", sig, "data", data.InputValues)
-	}
-	fmt.Println("CuEVM Debug: signatureToMethodMap", fw.signatureToMethodMap)
+	// fmt.Println("CuEVM Debug: staticABICallElementCache", fw.staticABICallElementCache)
+	// fmt.Println("CuEVM Debug: staticABIMarkerOffsetCache", fw.staticABIMarkerOffsetCache)
+	// fmt.Println("CuEVM Debug: staticABIDataABIValues", fw.staticABIDataABIValues)
+	// for sig, data := range fw.staticABIDataABIValues {
+	// 	fmt.Println("CuEVM Debug: sig", sig, "data", data.InputValues)
+	// }
+	// fmt.Println("CuEVM Debug: signatureToMethodMap", fw.signatureToMethodMap)
 	fmt.Println("\n\nCuEVM Debug: end of initializeABICache\n\n")
 }
 
@@ -338,15 +338,9 @@ func (fw *FuzzerWorker) updateMethods() {
 
 	// Loop through each deployed contract
 	for contractAddress, contractDefinition := range fw.deployedContracts {
-		fmt.Println("CuEVM Debug: contractAddress", contractAddress)
-		fmt.Println("CuEVM Debug: contractDefinition", contractDefinition.CompiledContract().Abi)
-
 		// If we deployed the contract, also enumerate property tests and state changing methods.
 		for _, method := range contractDefinition.AssertionTestMethods {
 			// Any non-constant method should be tracked as a state changing method.
-			fmt.Println("CuEVM Debug: method", method)
-			fmt.Println("CuEVM Debug: method.IsConstant()", method.IsConstant())
-			fmt.Println("CuEVM Debug: method.IsPayable()", method.IsPayable())
 			if method.IsConstant() {
 				// Only track the pure/view method if testing view methods is enabled
 				if fw.fuzzer.config.Fuzzing.Testing.TestViewMethods {

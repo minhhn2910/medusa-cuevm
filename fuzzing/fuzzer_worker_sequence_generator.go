@@ -226,7 +226,7 @@ func (g *CallSequenceGenerator) InitializeNextSequence() (bool, error) {
 	// If this provider has no corpus mutation methods or corpus call sequences, we return a call sequence with
 	// nil elements to signal that we want an entirely new sequence.
 	if g.mutationStrategyChooser.ChoiceCount() == 0 || g.worker.fuzzer.corpus.ActiveMutableSequenceCount() == 0 {
-		// fmt.Println("CuEVM Debug: no corpus mutation methods or corpus call sequences")
+		fmt.Println("CuEVM Debug: no corpus mutation methods or corpus call sequences")
 		return true, nil
 	}
 
@@ -415,10 +415,6 @@ func (g *CallSequenceGenerator) seedSequenceElementCache() {
 	g.worker.fuzzer.functionIsImpactedCache = make(map[string][]string)
 	g.worker.fuzzer.functionsWithImpactsCache = make([]string, 0)
 	allContractNames := make([]string, 0)
-	for contractName := range g.worker.fuzzer.slitherResults.FunctionRelations {
-		allContractNames = append(allContractNames, contractName)
-	}
-	fmt.Println("CuEVM Debug: allContractNames", allContractNames)
 	functionIsConstructor := func(functionName string) bool {
 		for _, contractName := range allContractNames {
 			if strings.HasPrefix(functionName, contractName+"(") {
@@ -430,46 +426,54 @@ func (g *CallSequenceGenerator) seedSequenceElementCache() {
 		}
 		return false
 	}
-	for contractName, relations := range g.worker.fuzzer.slitherResults.FunctionRelations {
-		fmt.Println("\n\nCuEVM Debug: contractName", contractName)
-		for _, rel := range relations {
+	if g.worker.fuzzer.slitherResults != nil {
+		for contractName := range g.worker.fuzzer.slitherResults.FunctionRelations {
+			allContractNames = append(allContractNames, contractName)
+		}
 
-			if functionIsConstructor(rel.Function) || normalizedSigCache[rel.Function] == "" {
-				fmt.Println("CuEVM Debug: skip constructor", rel.Function)
-				continue
-			}
-			methodSig := g.worker.fuzzer.normalizedSigCache[rel.Function]
+		fmt.Println("CuEVM Debug: allContractNames", allContractNames)
 
-			// Cache impacts
-			if len(rel.Impacts) > 0 {
-				for _, impact := range rel.Impacts {
-					if functionIsConstructor(impact) {
-						fmt.Println("CuEVM Debug: skip constructor", impact)
-						continue
-					}
-					fmt.Println("CuEVM Debug: impact", impact, "methodSig", methodSig, "normalizedSigCache", normalizedSigCache[impact])
-					if normalizedSigCache[impact] == "" {
-						fmt.Println("CuEVM Debug: normalizedSigCache[impact] is empty", impact)
-						continue
-					}
-					g.worker.fuzzer.functionImpactsCache[methodSig] = append(g.worker.fuzzer.functionImpactsCache[methodSig], normalizedSigCache[impact])
+		for contractName, relations := range g.worker.fuzzer.slitherResults.FunctionRelations {
+			fmt.Println("\n\nCuEVM Debug: contractName", contractName)
+			for _, rel := range relations {
+
+				if functionIsConstructor(rel.Function) || normalizedSigCache[rel.Function] == "" {
+					fmt.Println("CuEVM Debug: skip constructor", rel.Function)
+					continue
 				}
-				g.worker.fuzzer.functionsWithImpactsCache = append(g.worker.fuzzer.functionsWithImpactsCache, methodSig)
-			}
+				methodSig := g.worker.fuzzer.normalizedSigCache[rel.Function]
 
-			// Cache isImpactedBy
-			if len(rel.IsImpactedBy) > 0 {
-				for _, impacted := range rel.IsImpactedBy {
-					if functionIsConstructor(impacted) {
-						fmt.Println("CuEVM Debug: skip constructor", impacted)
-						continue
+				// Cache impacts
+				if len(rel.Impacts) > 0 {
+					for _, impact := range rel.Impacts {
+						if functionIsConstructor(impact) {
+							fmt.Println("CuEVM Debug: skip constructor", impact)
+							continue
+						}
+						fmt.Println("CuEVM Debug: impact", impact, "methodSig", methodSig, "normalizedSigCache", normalizedSigCache[impact])
+						if normalizedSigCache[impact] == "" {
+							fmt.Println("CuEVM Debug: normalizedSigCache[impact] is empty", impact)
+							continue
+						}
+						g.worker.fuzzer.functionImpactsCache[methodSig] = append(g.worker.fuzzer.functionImpactsCache[methodSig], normalizedSigCache[impact])
 					}
-					fmt.Println("CuEVM Debug: impacted", impacted, "methodSig", methodSig, "normalizedSigCache", normalizedSigCache[impacted])
-					if normalizedSigCache[impacted] == "" {
-						fmt.Println("CuEVM Debug: normalizedSigCache[impacted] is empty", impacted)
-						continue
+					g.worker.fuzzer.functionsWithImpactsCache = append(g.worker.fuzzer.functionsWithImpactsCache, methodSig)
+				}
+
+				// Cache isImpactedBy
+				if len(rel.IsImpactedBy) > 0 {
+					for _, impacted := range rel.IsImpactedBy {
+						if functionIsConstructor(impacted) {
+							fmt.Println("CuEVM Debug: skip constructor", impacted)
+							continue
+						}
+						fmt.Println("CuEVM Debug: impacted", impacted, "methodSig", methodSig, "normalizedSigCache", normalizedSigCache[impacted])
+						if normalizedSigCache[impacted] == "" {
+							fmt.Println("CuEVM Debug: normalizedSigCache[impacted] is empty", impacted)
+							continue
+						}
+						g.worker.fuzzer.functionIsImpactedCache[methodSig] = append(g.worker.fuzzer.functionIsImpactedCache[methodSig], normalizedSigCache[impacted])
 					}
-					g.worker.fuzzer.functionIsImpactedCache[methodSig] = append(g.worker.fuzzer.functionIsImpactedCache[methodSig], normalizedSigCache[impacted])
 				}
 			}
 		}
@@ -704,8 +708,8 @@ func (g *CallSequenceGenerator) generateNewElementWithMutationMask(candidate_poo
 		// select a random candidate from the pool
 		selectedSig := candidate_pool[g.worker.randomProvider.Intn(len(candidate_pool))]
 		selectedMethod = g.worker.signatureToMethodMap[selectedSig]
-		fmt.Println("CuEVM Debug: selectedMethod from pool", selectedMethod)
-		fmt.Println("CuEVM Debug: selectedMethod.Method.Sig from pool", selectedMethod.Method.Sig)
+		// fmt.Println("CuEVM Debug: selectedMethod from pool", selectedMethod)
+		// fmt.Println("CuEVM Debug: selectedMethod.Method.Sig from pool", selectedMethod.Method.Sig)
 	} else {
 		// CuEVM: many txs in paralel so we can afford to increase this chance
 		if (len(g.worker.pureMethods) > 0 && g.worker.randomProvider.Intn(200) == 1) || callOnlyPureFunctions {

@@ -212,12 +212,14 @@ type Fuzzer struct {
 
 	// contractAddressToCodeHash maps contract addresses to their runtime bytecode hashes for quick lookup
 	contractAddressToCodeHash map[common.Address]common.Hash
-	// CuEVM: CPU workers is fixed to number of threads x 2
+	// CuEVM: CPU workers is fixed to number of threads
 	numCPUWorkers         int
 	sequencesPerCPUWorker int
 	GPUchainInitiated     bool
 	numInstancesPerDevice int
 	loopCounter           int
+	currentRandomSeed     uint32 // current seed for the LCG generator in GPU. Default = loopCounter. Change every batch of tx.
+	forkMode              bool   // if true, use fork mode to initialize the test chain
 	// CuEVM debug: skip sequence size
 	skipSequenceSize          int
 	originalNonceMap          map[common.Address]uint64
@@ -230,6 +232,7 @@ type Fuzzer struct {
 	staticABIFlattenedMarkers []uint32 // flattened markers of all the methods w/o dynamic encoding
 	staticABIMarkerOffset     []uint32 // mapping of signature to offset in the flattened markers
 
+	pendingEvents   []chain.ContractDeploymentsAddedEvent
 	addressIndexMap map[common.Address]uint8 // mapping from address to index in the address addressConstants array
 
 	functionImpactsCache      map[string][]string // signature -> impacts
@@ -574,11 +577,16 @@ func (f *Fuzzer) AddCompilationTargets(compilations []compilationTypes.Compilati
 }
 
 // createTestChain creates a test chain with the account balance allocations specified by the config.
-func (f *Fuzzer) createTestChain() (*chain.TestChain, error) {
+func (f *Fuzzer) createTestChain(additionalGenesisAlloc *types.GenesisAlloc) (*chain.TestChain, error) {
 	// Create our genesis allocations.
 	// NOTE: Sharing GenesisAlloc between chains will result in some accounts not being funded for some reason.
 	genesisAlloc := make(types.GenesisAlloc)
-
+	if additionalGenesisAlloc != nil {
+		fmt.Println("CuEVM Debug: additionalGenesisAlloc")
+		for addr, account := range *additionalGenesisAlloc {
+			genesisAlloc[addr] = account
+		}
+	}
 	// Fund all of our sender addresses in the genesis block
 	initBalance := new(big.Int).Div(abi.MaxInt256, big.NewInt(2)) // TODO: make this configurable
 	for _, sender := range f.senders {
@@ -729,7 +737,7 @@ func chainSetupFromCompilations(fuzzer *Fuzzer, testChain *chain.TestChain) (*ex
 				// gas limit rather than use tx gas limit)
 				msg := calls.NewCallMessage(fuzzer.deployer, nil, 0, contractBalance, fuzzer.config.Fuzzing.BlockGasLimit, nil, nil, nil, msgData)
 				msg.FillFromTestChainProperties(testChain)
-
+				fmt.Println("CuEVM Debug: PendingBlockCreate", fuzzer.forkMode)
 				// Create a new pending block we'll commit to chain
 				block, err := testChain.PendingBlockCreate()
 				if err != nil {
@@ -738,13 +746,39 @@ func chainSetupFromCompilations(fuzzer *Fuzzer, testChain *chain.TestChain) (*ex
 
 				// Add our transaction to the block
 				err = testChain.PendingBlockAddTx(msg.ToCoreMessage())
+				fmt.Println("CuEVM Debug: err PendingBlockAddTx", err)
 				if err != nil {
 					return nil, err
 				}
 
 				// Commit the pending block to the chain, so it becomes the new head.
 				err = testChain.PendingBlockCommit()
+
 				if err != nil {
+					if fuzzer.forkMode {
+						// fail to run fork, we try to set the runtime bytecode
+						// testChain.PendingBlockDiscard()
+						fmt.Println("CuEVM Debug: forkMode and fail, we try last resort to set the runtime bytecode")
+						message_receipt := block.MessageResults[0].Receipt
+
+						// if fork mode and fail, we try last resort to set the runtime bytecode
+						found = true
+						deployedContractAddr[contractName] = message_receipt.ContractAddress
+						block.MessageResults[0].ContractDeploymentChanges[0].Contract.RuntimeBytecode = contract.CompiledContract().RuntimeBytecode
+						for i := 0; i < len(block.MessageResults); i++ {
+							for _, deploymentChange := range block.MessageResults[i].ContractDeploymentChanges {
+								deploymentChange.Contract.RuntimeBytecode = contract.CompiledContract().RuntimeBytecode
+								fuzzer.pendingEvents = append(fuzzer.pendingEvents, chain.ContractDeploymentsAddedEvent{
+									Contract:          deploymentChange.Contract,
+									DynamicDeployment: deploymentChange.DynamicCreation,
+								})
+							}
+						}
+
+						testChain.PendingBlockDiscard()
+						break
+
+					}
 					return nil, err
 				}
 
@@ -761,6 +795,27 @@ func chainSetupFromCompilations(fuzzer *Fuzzer, testChain *chain.TestChain) (*ex
 					// This should be one index before the current head block index.
 					// We should be able to attach an execution trace; however, if it fails, we provide the ExecutionResult at a minimum.
 					err = testChain.RevertToBlockIndex(uint64(len(testChain.CommittedBlocks()) - 1))
+
+					if fuzzer.forkMode {
+						fmt.Println("CuEVM Debug: forkMode and fail, we try last resort to set the runtime bytecode")
+						message_receipt := block.MessageResults[0].Receipt
+						deployedContractAddr[contractName] = message_receipt.ContractAddress
+
+						// if fork mode and fail, we try last resort to set the runtime bytecode
+						for i := 0; i < len(block.MessageResults); i++ {
+							for _, deploymentChange := range block.MessageResults[i].ContractDeploymentChanges {
+								deploymentChange.Contract.RuntimeBytecode = contract.CompiledContract().RuntimeBytecode
+								fuzzer.pendingEvents = append(fuzzer.pendingEvents, chain.ContractDeploymentsAddedEvent{
+									Contract:          deploymentChange.Contract,
+									DynamicDeployment: deploymentChange.DynamicCreation,
+								})
+							}
+						}
+						deployedContractAddr[contractName] = block.MessageResults[0].Receipt.ContractAddress
+						found = true
+						break
+					}
+
 					if err != nil {
 						return nil, fmt.Errorf("failed to reset to genesis block: %v", err)
 					} else {
@@ -832,13 +887,13 @@ func defaultCallSequenceGeneratorConfigFunc(fuzzer *Fuzzer, valueSet *valuegener
 
 	// Create a sequence generator config which uses the created value generator.
 	sequenceGenConfig := &CallSequenceGeneratorConfig{
-		NewSequenceProbability:                   0.3,
+		NewSequenceProbability:                   0.2,
 		RandomUnmodifiedCorpusHeadWeight:         800,
 		RandomUnmodifiedCorpusTailWeight:         800,
 		RandomUnmodifiedSpliceAtRandomWeight:     200,
 		RandomUnmodifiedInterleaveAtRandomWeight: 100,
 		RandomMutatedCorpusHeadWeight:            80,
-		RandomMutatedCorpusTailWeight:            10,
+		RandomMutatedCorpusTailWeight:            40,
 		RandomMutatedSpliceAtRandomWeight:        20,
 		RandomMutatedInterleaveAtRandomWeight:    10,
 		FunctionRelationBias:                     0.9, // CuEVM: mutate based on function relations 0.8
@@ -864,7 +919,7 @@ func defaultShrinkingValueMutatorFunc(fuzzer *Fuzzer, valueSet *valuegeneration.
 func (f *Fuzzer) spawnWorkersLoop(baseTestChain *chain.TestChain) error {
 	// Initialize workers array
 	f.workers = make([]*FuzzerWorker, f.numCPUWorkers)
-
+	fmt.Println("CuEVM Debug: context done", utils.CheckContextDone(f.ctx))
 	// Create all workers upfront
 	for i := 0; i < f.numCPUWorkers; i++ {
 		// Create a new worker for this fuzzing
@@ -933,6 +988,12 @@ func (f *Fuzzer) spawnWorkersLoop(baseTestChain *chain.TestChain) error {
 			worker.testingBaseBlockIndex = uint64(len(worker.chain.CommittedBlocks()))
 
 		}
+		if f.forkMode && len(f.pendingEvents) > 0 {
+			for _, event := range f.pendingEvents {
+				worker.chain.Events.ContractDeploymentAddedEventEmitter.Publish(event)
+			}
+			f.pendingEvents = nil
+		}
 
 	}
 
@@ -987,7 +1048,6 @@ func (f *Fuzzer) spawnWorkersLoop(baseTestChain *chain.TestChain) error {
 	}
 
 	// TODO: clone to other workers
-
 	// Main processing loop
 	working := true
 	for working && !utils.CheckContextDone(f.ctx) {
@@ -1005,12 +1065,14 @@ func (f *Fuzzer) spawnWorkersLoop(baseTestChain *chain.TestChain) error {
 		// Step 2: Launch GPU kernel - focusing only on testNextCallSequence
 		err = f.launchGPUKernel()
 		if err != nil {
+			fmt.Println("CuEVM Debug: launchGPUKernel error", err)
 			return err
 		}
 
 		// Step 3: Process results in parallel
 		workersCancelled, err = f.processWorkersResultsInParallel()
 		if err != nil {
+			fmt.Println("CuEVM Debug: processWorkersResultsInParallel error", err)
 			return err
 		}
 		if workersCancelled {
@@ -1149,44 +1211,6 @@ func (f *Fuzzer) prepareWorkersDataInParallel() (bool, error) {
 			// Create execution check function for this worker
 			worker.executionCheckFunc = func(currentlyExecutedSequence calls.CallSequence) (bool, error) {
 				return false, nil
-				// Get the last call sequence element that was executed
-				// latestCallSequenceElement := currentlyExecutedSequence[len(currentlyExecutedSequence)-1]
-				// // Get the decoded return values and add it to the base value set
-				// // Don't throw an error since we care more about coverage than adding the return values to the base value set
-				// decodedReturnValues, err := latestCallSequenceElement.DecodedReturnValues()
-				// if decodedReturnValues != nil && err == nil {
-				// 	worker.valueSet.Add(decodedReturnValues)
-				// }
-
-				// // Check for updates to coverage and corpus.
-				// // If we detect coverage changes, add this sequence with weight as 1 + sequences tested (to avoid zero weights)
-				// err = f.corpus.CheckSequenceCoverageAndUpdate(currentlyExecutedSequence, worker.getNewCorpusCallSequenceWeight(), true)
-				// if err != nil {
-				// 	return true, err
-				// }
-
-				// // Loop through each test function, signal our worker tested a call, and collect any requests to shrink
-				// // this call sequence.
-				// for _, callSequenceTestFunc := range f.Hooks.CallSequenceTestFuncs {
-				// 	newShrinkRequests, err := callSequenceTestFunc(worker, currentlyExecutedSequence)
-				// 	if err != nil {
-				// 		return true, err
-				// 	}
-				// 	worker.pendingShrinkRequests = append(worker.pendingShrinkRequests, newShrinkRequests...)
-				// }
-
-				// // Update our metrics
-				// worker.workerMetrics().callsTested.Add(worker.workerMetrics().callsTested, big.NewInt(1))
-				// lastCallSequenceElement := currentlyExecutedSequence[len(currentlyExecutedSequence)-1]
-				// worker.workerMetrics().gasUsed.Add(worker.workerMetrics().gasUsed, new(big.Int).SetUint64(lastCallSequenceElement.ChainReference.Block.MessageResults[lastCallSequenceElement.ChainReference.TransactionIndex].Receipt.GasUsed))
-
-				// // If our fuzzer context or the emergency context is cancelled, exit out immediately without results.
-				// if utils.CheckContextDone(f.ctx) {
-				// 	return true, nil
-				// }
-
-				// // If we have shrink requests, it means we violated a test, so we quit at this point
-				// return len(worker.pendingShrinkRequests) > 0, nil
 			}
 
 			// NEW: Reuse the pre-allocated call sequence elements (already allocated in initializeABICache)
@@ -1199,11 +1223,11 @@ func (f *Fuzzer) prepareWorkersDataInParallel() (bool, error) {
 
 			// Generate multiple sequences per worker
 			for seqIdx := 0; seqIdx < f.sequencesPerCPUWorker; seqIdx++ {
-				// fmt.Println("\n\nCuEVM Debug: seqIdx\n\n", seqIdx)
 				// Initialize a new sequence within our sequence generator
 
 				isNewSequence, err := worker.sequenceGenerator.InitializeNextSequence()
 				if err != nil {
+					fmt.Println("CuEVM Debug: InitializeNextSequence error", err)
 					errChan <- err
 					return
 				}
@@ -1211,14 +1235,6 @@ func (f *Fuzzer) prepareWorkersDataInParallel() (bool, error) {
 				if seqIdx == 0 {
 					worker.isNewSequence = isNewSequence
 				}
-
-				// CuEVM debug always use new sequence generator
-				// isNewSequence, err := worker.sequenceGenerator.InitializeNextSequence()
-				// if err != nil {
-				// 	errChan <- err
-				// 	return
-				// }
-				// worker.isNewSequence = isNewSequence
 
 				// Initialize a new sequence array
 				// worker.callSequenceElements[seqIdx] = make([]*calls.CallSequenceElement, 0)
@@ -1233,6 +1249,7 @@ func (f *Fuzzer) prepareWorkersDataInParallel() (bool, error) {
 				for {
 					element, err := worker.sequenceGenerator.PopSequenceElement()
 					if err != nil {
+						fmt.Println("CuEVM Debug: PopSequenceElement error", err)
 						errChan <- err
 						return
 					}
@@ -1305,32 +1322,11 @@ func (f *Fuzzer) runTransactionsGPU(workers []*FuzzerWorker, txBatchSize, sequen
 	// 		}
 	// 	}
 	// }
-	// Count valid call elements first
-	// validCallCount := txBatchSize * sequenceLength //len(f.workers) * len(workers[0].callSequenceElements) * len(workers[0].callSequenceElements[0])
-	// txBatchSize := len(f.workers) * len(workers[0].callSequenceElements)
-	// sequenceLength := len(workers[0].callSequenceElements[0])
-	// Create block number and timestamp arrays
-	// fmt.Println("CuEVM Debug: txBatchSize", txBatchSize, "sequenceLength", sequenceLength)
-	// blockNumbers := make([]uint64, validCallCount)
-	// timestamps := make([]uint64, validCallCount)
+
+	// update the current random seed for the LCG generator in GPU.
+	f.currentRandomSeed = uint32(f.randomProvider.Int31()) // always positive value
+
 	var markerData []uint32
-	// var markerOffsets []uint32
-	// var markerCounts []uint32 // Number of markers per transaction
-	// fmt.Println("CuEVM Debug: validCallCount", validCallCount, "txBatchSize", txBatchSize, "sequenceLength", sequenceLength)
-	// Clear and reuse pre-allocated arrays using efficient memory clearing
-	// no need to clear, it will be overwritten in the loop
-	// for i := range f.gpuFromAddr[:validCallCount] {
-	// 	f.gpuFromAddr[i] = 0
-	// }
-	// for i := range f.gpuDataOffsets[:validCallCount] {
-	// 	f.gpuDataOffsets[i] = 0
-	// }
-	// for i := range f.gpuDataSizes[:validCallCount] {
-	// 	f.gpuDataSizes[i] = 0
-	// }
-	// for i := range f.gpuMarkerOffsets[:validCallCount/f.skipSequenceSize] {
-	// 	f.gpuMarkerOffsets[i] = 0
-	// }
 
 	// Use pre-allocated arrays instead of creating new ones
 	toAddr := make([]byte, 32)
@@ -1516,7 +1512,7 @@ func (f *Fuzzer) runTransactionsGPU(workers []*FuzzerWorker, txBatchSize, sequen
 		C.uint32_t(len(markerData)),
 		C.uint32_t(txBatchSize),
 		C.uint32_t(sequenceLength),
-		C.uint32_t(f.loopCounter),
+		C.uint32_t(f.currentRandomSeed), // default random seed is C.uint32_t(f.loopCounter),
 	)
 
 	// fmt.Println("CuEVM Debug: C function returned", cResult)
@@ -1661,7 +1657,7 @@ func (f *Fuzzer) prepareAndProcessChainStateInGPU(testChain *chain.TestChain) er
 	}
 
 	// Convert state dump to JSON format
-	stateJSON := convertStateToJSON(&stateDump, testChain.Head().Header)
+	stateJSON := convertStateToJSON(&stateDump, testChain.Head().Header, worker)
 	// CuEVM debug, to be deleted
 	// fmt.Println("CuEVM Debug: stateJSON", stateJSON)
 	// os.Exit(0)
@@ -1720,10 +1716,10 @@ func (f *Fuzzer) prepareAndProcessChainStateInGPU(testChain *chain.TestChain) er
 	}
 	// create markers data for static aBI methods
 
-	fmt.Println("CuEVM Debug: flattened markerData")
-	for _, marker := range f.staticABIFlattenedMarkers {
-		fmt.Println("CuEVM Debug: marker", marker)
-	}
+	// fmt.Println("CuEVM Debug: flattened markerData")
+	// for _, marker := range f.staticABIFlattenedMarkers {
+	// 	fmt.Println("CuEVM Debug: marker", marker)
+	// }
 
 	// CuEVM debug June 27, change the num_instances calculation
 	result := C.process_json_state_gpu(cJSON, C.uint(f.config.Fuzzing.Workers*f.skipSequenceSize), false, C.uint(f.skipSequenceSize), constantJSON,
@@ -1743,7 +1739,7 @@ func (f *Fuzzer) prepareAndProcessChainStateInGPU(testChain *chain.TestChain) er
 }
 
 // convertStateToJSON converts a state dump to JSON string compatible with CuEVM's expected format
-func convertStateToJSON(stateDump *ethstate.Dump, blockHeader *types.Header) string {
+func convertStateToJSON(stateDump *ethstate.Dump, blockHeader *types.Header, worker *FuzzerWorker) string {
 	// Create a map for the "pre" state format
 	preState := make(map[string]map[string]interface{})
 
@@ -1786,6 +1782,20 @@ func convertStateToJSON(stateDump *ethstate.Dump, blockHeader *types.Header) str
 		// Add to pre state
 		preState[addrStr] = accountMap
 	}
+
+	// if worker.fuzzer.forkMode {
+	// 	for addr, contract := range worker.deployedContracts {
+	// 		addrStr := addr.Hex()
+	// 		if _, ok := preState[addrStr]; !ok {
+	// 			fmt.Println("CuEVM Debug: Not found in preState, add deployed contract to preState", addrStr)
+	// 			preState[addrStr] = make(map[string]interface{})
+	// 			preState[addrStr]["code"] = "0x" + hex.EncodeToString(contract.CompiledContract().RuntimeBytecode)
+	// 			preState[addrStr]["nonce"] = "0x01"
+	// 			preState[addrStr]["balance"] = "0x01"
+	// 			preState[addrStr]["storage"] = make(map[string]string)
+	// 		}
+	// 	}
+	// }
 
 	// Create the final structure including env information
 	stateStruct := map[string]interface{}{
@@ -1833,27 +1843,6 @@ func (f *Fuzzer) launchGPUKernel() error {
 
 	// CuEVM debug, to be deleted
 	// Extract transaction data from first element of each sequence
-
-	// var txDataList []string
-	// for i := 0; i < len(f.workers); i++ {
-	// 	for j := 0; j < len(f.workers[i].callSequenceElements); j++ {
-	// 		// Get the first element of the sequence (index 0)
-	// 		if len(f.workers[i].callSequenceElements[j]) > 0 {
-	// 			firstElement := f.workers[i].callSequenceElements[j][0]
-	// 			if firstElement != nil && firstElement.Call != nil && len(firstElement.Call.Data) > 0 {
-	// 				// Convert data to hex string with 0x prefix
-	// 				hexData := fmt.Sprintf("\"0x%x\"", firstElement.Call.Data)
-	// 				txDataList = append(txDataList, hexData)
-	// 			}
-	// 		}
-	// 	}
-	// }
-
-	// // // Print all transaction data in the requested format
-	// if len(txDataList) > 0 {
-	// 	fmt.Println(strings.Join(txDataList, ","))
-	// }
-
 	// for i := 0; i < len(f.workers); i++ {
 	// 	for j := 0; j < len(f.workers[i].callSequenceElements); j++ {
 	// 		for k := 0; k < len(f.workers[i].callSequenceElements[j]); k++ {
@@ -1914,16 +1903,18 @@ func (f *Fuzzer) launchGPUKernel() error {
 					// dataMarkers := f.workers[workerIdx].callSequenceElements[(sequenceIdx/f.skipSequenceSize)*f.skipSequenceSize][i].Call.DataMarkers
 					// fmt.Println("CuEVM Debug: fullSequence[i].Call.Data", hex.EncodeToString(fullSequence[i].Call.Data))
 					// mutatedData, mutatedBlockNumber, mutatedBlockTimestamp, mutatedValue := f.restore_mutation(fullSequence[i].Call.Data, dataMarkers, int(gpuResults.NewCoverageIndices[batchIdx][idx]), i)
-					mutatedData, mutatedBlockNumber, mutatedBlockTimestamp, mutatedSenderIndex, mutatedValue := fuzzingutils.RestoreMutation(fullSequence[i].Call.Data, dataMarkers, int(gpuResults.NewCoverageIndices[batchIdx][idx]), i,
-						fuzzingutils.FuzzerConfig{
-							LoopCounter:            f.loopCounter,
-							NumInstancesPerDevice:  f.numInstancesPerDevice,
-							AddressConstants:       f.addressConstants,
-							IntegerConstants:       f.integerConstants,
-							BlockNumberDelayMax:    60480, // hardcode for now
-							BlockTimestampDelayMax: 604800,
-							SenderCount:            uint32(len(f.senders)),
-						})
+					mutatedData, mutatedBlockNumber, mutatedBlockTimestamp, mutatedSenderIndex, mutatedValue :=
+						fuzzingutils.RestoreMutation(fullSequence[i].Call.Data, dataMarkers, int(gpuResults.NewCoverageIndices[batchIdx][idx]), i,
+							fuzzingutils.FuzzerConfig{
+								StartSeed:              f.currentRandomSeed,
+								BatchSize:              uint32(txBatchSizeGPU),
+								NumInstancesPerDevice:  f.numInstancesPerDevice,
+								AddressConstants:       f.addressConstants,
+								IntegerConstants:       f.integerConstants,
+								BlockNumberDelayMax:    60480, // hardcode for now
+								BlockTimestampDelayMax: 604800,
+								SenderCount:            uint32(len(f.senders)),
+							})
 
 					if mutatedBlockNumber >= 0 {
 						fullSequence[i].BlockNumberDelay = uint64(mutatedBlockNumber)
@@ -2245,7 +2236,7 @@ func (f *Fuzzer) Start() error {
 	// CuEVM Debug: fixed number of CPU workers
 	f.numCPUWorkers = runtime.NumCPU()
 	f.GPUchainInitiated = false
-	rawSequencesPerWorker := f.config.Fuzzing.Workers / f.numCPUWorkers
+	rawSequencesPerWorker := (f.config.Fuzzing.Workers / f.skipSequenceSize) / f.numCPUWorkers
 
 	// Round up to next multiple of skipSequenceSize
 	roundedSequencesPerWorker := max(1, rawSequencesPerWorker)
@@ -2272,7 +2263,7 @@ func (f *Fuzzer) Start() error {
 	initialCallDataCapacity := validCallCount * 100 // Estimate 100 bytes per call on average
 	f.gpuCallDataBuffer = make([]byte, 0, initialCallDataCapacity)
 
-	fmt.Println("CuEVM Debug: f.sequencesPerCPUWorker", f.sequencesPerCPUWorker, "f.config.Fuzzing.Workers", f.config.Fuzzing.Workers, "f.numCPUWorkers", f.numCPUWorkers)
+	// fmt.Println("CuEVM Debug: f.sequencesPerCPUWorker", f.sequencesPerCPUWorker, "f.config.Fuzzing.Workers", f.config.Fuzzing.Workers, "f.numCPUWorkers", f.numCPUWorkers)
 	// Create our main and emergency running context (allows us to cancel across threads)
 	f.ctx, f.ctxCancelFunc = context.WithCancel(context.Background())
 	f.emergencyCtx, f.emergencyCtxCancelFunc = context.WithCancel(context.Background())
@@ -2306,7 +2297,7 @@ func (f *Fuzzer) Start() error {
 
 	// fmt.Println("testchain config skipAccountChecks", f.config.Fuzzing.TestChainConfig.SkipAccountChecks)
 	// Create our test chain
-	baseTestChain, err := f.createTestChain()
+	baseTestChain, err := f.createTestChain(nil)
 	if err != nil {
 		f.logger.Error("Failed to create the test chain", err)
 		return err
@@ -2314,6 +2305,7 @@ func (f *Fuzzer) Start() error {
 
 	// Set it up with our deployment/setup strategy defined by the fuzzer.
 	f.logger.Info("Setting up test chain")
+	f.forkMode = false
 	trace, err := f.Hooks.ChainSetupFunc(f, baseTestChain)
 	if err != nil {
 		if trace != nil {
@@ -2324,16 +2316,29 @@ func (f *Fuzzer) Start() error {
 		fmt.Println("Retry with chain fork")
 		f.config.Fuzzing.TestChainConfig.ForkConfig.ForkModeEnabled = true
 		f.config.Fuzzing.TestChainConfig.ForkConfig.RpcUrl = "https://eth.llamarpc.com"
-		f.config.Fuzzing.TestChainConfig.ForkConfig.RpcBlock = 22592600
+		f.config.Fuzzing.TestChainConfig.ForkConfig.RpcBlock = 22816200
 		f.config.Fuzzing.TestChainConfig.ForkConfig.PoolSize = 20
-		baseTestChain, err = f.createTestChain()
+		f.forkMode = true
+		baseTestChain, err = f.createTestChain(nil)
 		trace, err = f.Hooks.ChainSetupFunc(f, baseTestChain)
-		if err != nil {
-			if trace != nil {
-				f.logger.Error("Failed to initialize the test chain", err, errors.New(trace.Log().ColorString()))
+		fmt.Println("CuEVM Debug: trace", trace)
+		fmt.Println("CuEVM Debug: err", err)
+		if err != nil || len(f.pendingEvents) > 0 {
+			f.logger.Error("Failed to initialize the test chain with fork, try setting runtime bytecode", err)
+			f.config.Fuzzing.TestChainConfig.ForkConfig.ForkModeEnabled = false
+			genesisAlloc := make(types.GenesisAlloc)
+			for _, event := range f.pendingEvents {
+				genesisAlloc[event.Contract.Address] = types.Account{
+					Balance: big.NewInt(0),
+					Code:    event.Contract.RuntimeBytecode,
+					Nonce:   0,
+				}
 			}
-			f.logger.Error("Failed to initialize the test chain with fork", err)
-			return err
+
+			baseTestChain, err = f.createTestChain(&genesisAlloc)
+			fmt.Println("CuEVM Debug: code", hex.EncodeToString(baseTestChain.State().GetCode(f.pendingEvents[0].Contract.Address)))
+			fmt.Println("CuEVM Debug: setting runtime bytecode err", err)
+			err = nil
 		}
 		f.logger.Info("Finished setting up test chain with fork")
 	}
@@ -2364,7 +2369,7 @@ func (f *Fuzzer) Start() error {
 	}
 
 	// Log the start of our fuzzing campaign.
-	f.logger.Info("Fuzzing with ", colors.Bold, f.config.Fuzzing.Workers, colors.Reset, " GPU workers, ", colors.Bold, f.numCPUWorkers, colors.Reset, " CPU workers, and ", colors.Bold, f.sequencesPerCPUWorker, colors.Reset, " sequences per CPU worker")
+	f.logger.Info("Fuzzing with ", colors.Bold, f.numCPUWorkers*f.skipSequenceSize*f.sequencesPerCPUWorker, colors.Reset, " GPU workers, ", colors.Bold, f.numCPUWorkers, colors.Reset, " CPU workers, and ", colors.Bold, f.sequencesPerCPUWorker, colors.Reset, " sequences per CPU worker")
 
 	// Start our printing loop now that we're about to begin fuzzing.
 	go f.printMetricsLoop()

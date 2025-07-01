@@ -9,7 +9,8 @@ import (
 )
 
 type FuzzerConfig struct {
-	LoopCounter            int
+	StartSeed              uint32
+	BatchSize              uint32
 	NumInstancesPerDevice  int
 	AddressConstants       []string
 	IntegerConstants       []string
@@ -137,7 +138,9 @@ func MutateValue(seed uint32, value *big.Int) uint32 {
 // RestoreMutation applies mutation to transaction data following the CUDA logic
 func RestoreMutation(data []byte, dataMarkers []calls.DataMarker, sequenceIdx, elementIdx int, fuzzerConfig FuzzerConfig) ([]byte, int64, int64, int32, *big.Int) {
 
-	seed := uint32(fuzzerConfig.LoopCounter) + uint32(elementIdx) + uint32(sequenceIdx) + uint32(sequenceIdx)/uint32(fuzzerConfig.NumInstancesPerDevice)
+	seed := fuzzerConfig.StartSeed + uint32(elementIdx)*fuzzerConfig.BatchSize + uint32(sequenceIdx) + uint32(sequenceIdx)/uint32(fuzzerConfig.NumInstancesPerDevice)
+	// fmt.Println("CuEVM Debug: fuzzerConfig", fuzzerConfig)
+	// fmt.Println("CuEVM Debug: sequenceIdx", sequenceIdx, "elementIdx", elementIdx, "seed", seed)
 	mutated := make([]byte, len(data))
 	copy(mutated, data)
 

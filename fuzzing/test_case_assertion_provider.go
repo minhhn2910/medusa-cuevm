@@ -264,6 +264,7 @@ func (t *AssertionTestCaseProvider) GPUPostCallTest(workers []*FuzzerWorker, gpu
 	}
 	skipSequenceSize := t.fuzzer.skipSequenceSize
 	txBatchSizeCPU := t.fuzzer.sequencesPerCPUWorker * t.fuzzer.numCPUWorkers
+	txBatchSizeGPU := t.fuzzer.sequencesPerCPUWorker * t.fuzzer.numCPUWorkers * t.fuzzer.skipSequenceSize
 	total_bugs_encountered := 0
 	for batchIdx := 0; batchIdx < len(gpuResult.NewBugIndices); batchIdx++ {
 		total_bugs_encountered += len(gpuResult.NewBugIndices[batchIdx])
@@ -290,7 +291,8 @@ func (t *AssertionTestCaseProvider) GPUPostCallTest(workers []*FuzzerWorker, gpu
 					dataMarkers = workers[workerIdx].callSequenceElements[sequenceIdx][i].Call.DataMarkers
 				}
 				mutatedData, mutatedBlockNumber, mutatedBlockTimestamp, mutatedSenderIndex, mutatedValue := fuzzingutils.RestoreMutation(fullSequence[i].Call.Data, dataMarkers, int(gpuResult.NewBugIndices[batchIdx][idx]), i, fuzzingutils.FuzzerConfig{
-					LoopCounter:            t.fuzzer.loopCounter,
+					StartSeed:              t.fuzzer.currentRandomSeed,
+					BatchSize:              uint32(txBatchSizeGPU),
 					NumInstancesPerDevice:  t.fuzzer.numInstancesPerDevice,
 					AddressConstants:       t.fuzzer.addressConstants,
 					IntegerConstants:       t.fuzzer.integerConstants,
