@@ -533,12 +533,12 @@ func (c *Corpus) CheckSequenceCoverageAndUpdateDebug(callSequence calls.CallSequ
 
 	// If we had an increase in coverage, we save the sequence.
 	if coverageUpdated {
-		fmt.Println("\nMedusa: coverage updated\n")
+		// fmt.Println("\nMedusa: coverage updated\n")
 		// fmt.Println("Medusa: coverage after update")
 		// fmt.Println(c.coverageMaps.DebugString())
-		uniquePCs, _ := coverage.GetUniquePCsCount(compilations, c.coverageMaps, c.logger)
+		// uniquePCs, _ := coverage.GetUniquePCsCount(compilations, c.coverageMaps, c.logger, false)
 
-		fmt.Println("\n\nMEDUSA_UNIQUE_PC_COUNT:", uniquePCs, "\n\n")
+		// fmt.Println("\n\nMEDUSA_UNIQUE_PC_COUNT:", uniquePCs, "\n\n")
 
 		// If we achieved new coverage, save this sequence for mutation purposes.
 		// err = c.addCallSequence(c.callSequenceFiles, callSequence, true, mutationChooserWeight, flushImmediately)
