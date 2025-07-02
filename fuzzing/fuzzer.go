@@ -1041,14 +1041,14 @@ func (f *Fuzzer) spawnWorkersLoop(baseTestChain *chain.TestChain) error {
 	// make sure chain is initialized before this step
 	f.workers[0].sequenceGenerator.seedSequenceElementCache()
 	// print out the cache
-	fmt.Println("CuEVM Debug: signatureDynamicEncoding", f.signatureDynamicEncoding)
-	for i := 0; i < len(f.staticABICallData); i++ {
+	// fmt.Println("CuEVM Debug: signatureDynamicEncoding", f.signatureDynamicEncoding)
+	// for i := 0; i < len(f.staticABICallData); i++ {
 
-		fmt.Println("CuEVM Debug: staticABICallData", hex.EncodeToString(f.staticABICallData[i]))
-		fmt.Println("CuEVM Debug: staticABISignature", f.staticABISignature[i])
-		fmt.Println("CuEVM Debug: staticABIMarkers", f.staticABIMarkers[i])
-		fmt.Println("CuEVM Debug: staticABIMarkerIndexMap", f.staticABIMarkerIndexMap[f.staticABISignature[i]])
-	}
+	// 	fmt.Println("CuEVM Debug: staticABICallData", hex.EncodeToString(f.staticABICallData[i]))
+	// 	fmt.Println("CuEVM Debug: staticABISignature", f.staticABISignature[i])
+	// 	fmt.Println("CuEVM Debug: staticABIMarkers", f.staticABIMarkers[i])
+	// 	fmt.Println("CuEVM Debug: staticABIMarkerIndexMap", f.staticABIMarkerIndexMap[f.staticABISignature[i]])
+	// }
 
 	// TODO: clone to other workers
 	// Main processing loop
@@ -1084,7 +1084,7 @@ func (f *Fuzzer) spawnWorkersLoop(baseTestChain *chain.TestChain) error {
 
 		f.loopCounter++
 
-		// if f.loopCounter == 2 {
+		// if f.loopCounter == 1 {
 		// 	working = false
 		// }
 		// CuEVM Debug
@@ -2655,6 +2655,13 @@ func groupConstantsByTypeHex(addresses []common.Address, integers []*big.Int) ma
 		cMod.FillBytes(b)
 		hexStr := "0x" + hex.EncodeToString(b)
 		result["integer"] = append(result["integer"], hexStr)
+	}
+	// corner case for empty constants
+	if len(result["address"]) == 0 {
+		result["address"] = append(result["address"], "0x0000000000000000000000000000000000000000")
+	}
+	if len(result["integer"]) == 0 {
+		result["integer"] = append(result["integer"], "0x0000000000000000000000000000000000000000000000000000000000000000")
 	}
 	return result
 }
