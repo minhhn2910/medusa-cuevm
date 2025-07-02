@@ -62,6 +62,9 @@ type FuzzingConfig struct {
 	// CoverageEnabled describes whether to use coverage-guided fuzzing
 	CoverageEnabled bool `json:"coverageEnabled"`
 
+	// DeploymentCodeCoverageEnabled describes whether to use coverage-guided fuzzing for deployment code
+	DeploymentCodeCoverageEnabled bool `json:"deploymentCodeCoverageEnabled"`
+
 	// CoverageFormats indicate which reports to generate: "lcov" and "html" are supported.
 	CoverageFormats []string `json:"coverageFormats"`
 

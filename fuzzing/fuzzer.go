@@ -926,7 +926,7 @@ func (f *Fuzzer) Start() error {
 	// Print our results on exit.
 	f.printExitingResults()
 	// print unique PC count for printing to the console
-	uniquePCs, err := coverage.GetUniquePCsCount(f.compilations, f.corpus.CoverageMaps(), f.logger)
+	uniquePCs, err := coverage.GetUniquePCsCount(f.compilations, f.corpus.CoverageMaps(), f.logger, f.config.Fuzzing.DeploymentCodeCoverageEnabled)
 	if err != nil {
 		f.logger.Error("Failed to get unique PC count", err)
 		uniquePCs = 0
@@ -1046,7 +1046,7 @@ func (f *Fuzzer) printMetricsLoop() {
 
 			if time.Since(f.lastPCsLogMsg) >= timeBetweenPCsLogMsgs {
 				start := time.Now()
-				totalPCs, err := coverage.GetUniquePCsCount(f.compilations, f.corpus.CoverageMaps(), f.logger)
+				totalPCs, err := coverage.GetUniquePCsCount(f.compilations, f.corpus.CoverageMaps(), f.logger, f.config.Fuzzing.DeploymentCodeCoverageEnabled)
 				// This is just for a log message. This shouldn't error but if it does we don't need to exit out
 				if err == nil {
 					end := time.Now()
