@@ -386,6 +386,17 @@ func (c *Corpus) Initialize(baseTestChain *chain.TestChain, contractDefinitions 
 	return corpusSequencesActive, corpusSequencesTotal, nil
 }
 
+// CuEVM debug: expose this function to be called in fuzzer.go
+func (c *Corpus) ExtractAllSequences() []calls.CallSequence {
+
+	callSequencesToTest := make([]calls.CallSequence, 0)
+	for _, file := range c.callSequenceFiles.files {
+		callSequencesToTest = append(callSequencesToTest, file.data)
+	}
+	// c.mutationTargetSequenceChooser.PrintChoices()
+	return callSequencesToTest
+}
+
 // addCallSequence adds a call sequence to the corpus in a given corpus directory.
 // Returns an error, if one occurs.
 func (c *Corpus) addCallSequence(sequenceFiles *corpusDirectory[calls.CallSequence], sequence calls.CallSequence, useInMutations bool, mutationChooserWeight *big.Int, flushImmediately bool) error {

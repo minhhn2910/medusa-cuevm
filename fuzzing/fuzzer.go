@@ -825,7 +825,23 @@ func (f *Fuzzer) Start() error {
 		} else {
 			f.logger.Error("Failed to initialize the test chain", err)
 		}
-		return err
+		fmt.Println("Retry with chain fork")
+		f.config.Fuzzing.TestChainConfig.ForkConfig.ForkModeEnabled = true
+		f.config.Fuzzing.TestChainConfig.ForkConfig.RpcUrl = "https://eth.llamarpc.com"
+		f.config.Fuzzing.TestChainConfig.ForkConfig.RpcBlock = 22816200
+		f.config.Fuzzing.TestChainConfig.ForkConfig.PoolSize = 20
+		baseTestChain, err = f.createTestChain()
+		trace, err = f.Hooks.ChainSetupFunc(f, baseTestChain)
+		if err != nil {
+			if trace != nil {
+				f.logger.Error("Failed to initialize the test chain", err, errors.New(trace.Log().ColorString()))
+			}
+			f.logger.Error("Failed to initialize the test chain with fork", err)
+			return err
+		}
+		f.logger.Info("Finished setting up test chain with fork")
+
+		// return err
 	}
 	f.logger.Info("Finished setting up test chain")
 
@@ -901,8 +917,21 @@ func (f *Fuzzer) Start() error {
 		f.logger.Error("FuzzerStopping event subscriber returned an error", err)
 	}
 
+	// fmt.Printf("sequence tested: %d\n", f.metrics.SequencesTested())
+	// allSequences := f.corpus.ExtractAllSequences()
+	// for idx, sequence := range allSequences {
+	// 	fmt.Println("Corpus Sequence: ", idx, sequence)
+	// }
+
 	// Print our results on exit.
 	f.printExitingResults()
+	// print unique PC count for printing to the console
+	uniquePCs, err := coverage.GetUniquePCsCount(f.compilations, f.corpus.CoverageMaps(), f.logger)
+	if err != nil {
+		f.logger.Error("Failed to get unique PC count", err)
+		uniquePCs = 0
+	}
+	fmt.Println("MEDUSA_UNIQUE_PC_COUNT:", uniquePCs)
 
 	// Finally, generate our coverage report if we have set a valid corpus directory.
 	if err == nil && len(f.config.Fuzzing.CoverageFormats) > 0 {
