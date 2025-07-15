@@ -240,6 +240,9 @@ type Fuzzer struct {
 	functionsWithImpactsCache []string            // signatures that have impacts (for first element)
 	normalizedSigCache        map[string]string   // signature -> normalized signature
 
+	// convenient fuzzing metrics storage
+	callsTested int
+
 	// CuEVM debug: shrink workers
 	shrinkWorkers []*FuzzerWorker
 
@@ -1089,6 +1092,7 @@ func (f *Fuzzer) spawnWorkersLoop(baseTestChain *chain.TestChain) error {
 		// }
 		// CuEVM Debug
 		fmt.Printf("\n Medusa loop counter: %d\n", f.loopCounter)
+		f.callsTested = f.loopCounter * f.sequencesPerCPUWorker * f.numCPUWorkers * f.config.Fuzzing.CallSequenceLength * f.skipSequenceSize
 
 	}
 	// fmt.Println("Medusa Coverage after fuzzing")
@@ -2046,11 +2050,11 @@ func (f *Fuzzer) processWorkersResultsInParallel() (bool, error) {
 			}
 
 			// If this was not a new call sequence, indicate not to save the shrunken result to the corpus again
-			if !worker.isNewSequence {
-				for i := 0; i < len(worker.pendingShrinkRequests); i++ {
-					worker.pendingShrinkRequests[i].RecordResultInCorpus = false
-				}
-			}
+			// if !worker.isNewSequence {
+			// 	for i := 0; i < len(worker.pendingShrinkRequests); i++ {
+			// 		worker.pendingShrinkRequests[i].RecordResultInCorpus = false
+			// 	}
+			// }
 
 			// Add any new shrink requests to the worker's list for next iteration
 			// fmt.Println("CuEVM Debug: workerIdx", workerIndex, "worker.pendingShrinkRequests", len(worker.pendingShrinkRequests))
@@ -2058,47 +2062,47 @@ func (f *Fuzzer) processWorkersResultsInParallel() (bool, error) {
 				worker.shrinkCallSequenceRequests = append(worker.shrinkCallSequenceRequests, worker.pendingShrinkRequests...)
 			}
 
-			// Reset value set to original
-			worker.valueSet = worker.originalValueSet
+			// // Reset value set to original
+			// worker.valueSet = worker.originalValueSet
 
-			// Reset chain state
-			if worker.lastExecutionError == nil {
-				err := worker.chain.RevertToBlockIndex(worker.testingBaseBlockIndex)
-				if err != nil {
-					errChan <- err
-					return
-				}
-			} else {
-				// Return any execution error
-				errChan <- worker.lastExecutionError
-				return
-			}
+			// // Reset chain state
+			// if worker.lastExecutionError == nil {
+			// 	err := worker.chain.RevertToBlockIndex(worker.testingBaseBlockIndex)
+			// 	if err != nil {
+			// 		errChan <- err
+			// 		return
+			// 	}
+			// } else {
+			// 	// Return any execution error
+			// 	errChan <- worker.lastExecutionError
+			// 	return
+			// }
 
 			// Emit event indicating the worker finished testing a call sequence
-			err := worker.Events.CallSequenceTested.Publish(FuzzerWorkerCallSequenceTestedEvent{
-				Worker: worker,
-			})
-			if err != nil {
-				errChan <- fmt.Errorf("error returned by an event handler: %v", err)
-				return
-			}
+			// err := worker.Events.CallSequenceTested.Publish(FuzzerWorkerCallSequenceTestedEvent{
+			// 	Worker: worker,
+			// })
+			// if err != nil {
+			// 	errChan <- fmt.Errorf("error returned by an event handler: %v", err)
+			// 	return
+			// }
 
 			// Update metrics
-			worker.workerMetrics().sequencesTested.Add(worker.workerMetrics().sequencesTested, big.NewInt(1*int64(f.sequencesPerCPUWorker)))
-			worker.workerMetrics().callsTested.Add(worker.workerMetrics().callsTested, big.NewInt(int64(f.sequencesPerCPUWorker*worker.fuzzer.config.Fuzzing.CallSequenceLength)))
+			// worker.workerMetrics().sequencesTested.Add(worker.workerMetrics().sequencesTested, big.NewInt(1*int64(f.sequencesPerCPUWorker)))
+			// worker.workerMetrics().callsTested.Add(worker.workerMetrics().callsTested, big.NewInt(int64(f.sequencesPerCPUWorker*worker.fuzzer.config.Fuzzing.CallSequenceLength)))
 			// fmt.Println("CuEVM Debug: worker.workerMetrics().sequencesTested", worker.workerMetrics().sequencesTested)
 			// fmt.Println("CuEVM Debug: worker.workerMetrics().callsTested", worker.workerMetrics().callsTested)
 			// Check if we've reached the worker reset limit
-			sequencesTested := worker.workerMetrics().sequencesTested.Uint64() / uint64(f.sequencesPerCPUWorker) // div by sequences per cpu worker to check worker reset limit
-			if sequencesTested > uint64(worker.fuzzer.config.Fuzzing.WorkerResetLimit) {
-				// Close the chain to free resources
-				// GPU workers we will not free the chain, just keep it to run at the end
-				// if worker.chain != nil {
-				// 	worker.chain.Close()
-				// 	worker.chain = nil
-				// }
-				worker.workerMetrics().sequencesTested = big.NewInt(0)
-			}
+			// sequencesTested := worker.workerMetrics().sequencesTested.Uint64() / uint64(f.sequencesPerCPUWorker) // div by sequences per cpu worker to check worker reset limit
+			// if sequencesTested > uint64(worker.fuzzer.config.Fuzzing.WorkerResetLimit) {
+			// Close the chain to free resources
+			// GPU workers we will not free the chain, just keep it to run at the end
+			// if worker.chain != nil {
+			// 	worker.chain.Close()
+			// 	worker.chain = nil
+			// }
+			// worker.workerMetrics().sequencesTested = big.NewInt(0)
+			// }
 		}(i)
 	}
 
@@ -2446,6 +2450,7 @@ func (f *Fuzzer) Start() error {
 		uniquePCs = 0
 	}
 	fmt.Println("MEDUSA_UNIQUE_PC_COUNT:", uniquePCs)
+	fmt.Println("MEDUSA_TOTAL_TRANSACTIONS:", f.callsTested)
 
 	// Finally, generate our coverage report if we have set a valid corpus directory.
 	if err == nil && len(f.config.Fuzzing.CoverageFormats) > 0 {
@@ -2473,6 +2478,17 @@ func (f *Fuzzer) Start() error {
 					f.logger.Error(fmt.Sprintf("Failed to generate %s coverage report", reportType), err)
 				} else {
 					f.logger.Info(fmt.Sprintf("%s report(s) saved to: %s", reportType, path), colors.Bold, colors.Reset)
+				}
+			}
+
+			// Get all sequences from the corpus
+			allSequences := f.corpus.ExtractAllSequences()
+			// Write corpus sequences to JSON file
+			corpusPath := filepath.Join(coverageReportDir, "corpus.json")
+			corpusData, jsonErr := json.Marshal(allSequences)
+			if jsonErr == nil {
+				if writeErr := os.WriteFile(corpusPath, corpusData, 0644); writeErr == nil {
+					f.logger.Info("Corpus sequences saved to: ", colors.Bold, corpusPath, colors.Reset)
 				}
 			}
 		}

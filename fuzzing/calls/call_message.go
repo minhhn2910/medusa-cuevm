@@ -24,6 +24,8 @@ const (
 	DataTypeUnknown DataType = 0
 	DataTypeAddress DataType = 1
 	DataTypeValue   DataType = 2
+	DataTypeBool    DataType = 3
+	// We utilize other non 8x values for other types
 	// For int/uint, use the number of bits as the enum value (8, 16, 32, 64, 128, 256, etc.)
 )
 

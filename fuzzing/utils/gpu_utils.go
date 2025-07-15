@@ -30,8 +30,9 @@ const (
 	VALUE_MUTATE_INT32                    = 7
 	VALUE_CHANCE_TO_STOP_INT_32           = 30
 
-	ELEMENT_VALUE_TYPE   = 2
 	ELEMENT_ADDRESS_TYPE = 1
+	ELEMENT_VALUE_TYPE   = 2
+	ELEMENT_BOOL_TYPE    = 3
 )
 
 // MutateByteArray mutates a byte array in-place, starting at data[0]
@@ -166,14 +167,6 @@ func RestoreMutation(data []byte, dataMarkers []calls.DataMarker, sequenceIdx, e
 			// fmt.Println("CuEVM Debug: mutated value, seed", seed)
 			continue
 		}
-
-		seed = (a*seed + c) % m
-		randomChance := seed % 100
-		if randomChance <= CHANCE_TO_SKIP_MUTATE {
-			// fmt.Println("CuEVM Debug: skipping mutate, seed", seed)
-			continue
-		}
-
 		// input validation and debug
 		if (elementOffset + int(elementLength)) > len(mutated) {
 			fmt.Println("CuEVM Debug: elementOffset + elementLength is greater than mutated length", elementOffset, elementLength, len(mutated))
@@ -182,8 +175,20 @@ func RestoreMutation(data []byte, dataMarkers []calls.DataMarker, sequenceIdx, e
 		}
 
 		slice := mutated[elementOffset:] // operate directly on the sub-slice
+		if elementType == ELEMENT_BOOL_TYPE {
+			seed = (a*seed + c) % m
+			slice[31] = byte(seed % 2)
+			continue
+		}
 
-		if elementType > 2 {
+		seed = (a*seed + c) % m
+		randomChance := seed % 100
+		if randomChance <= CHANCE_TO_SKIP_MUTATE {
+			// fmt.Println("CuEVM Debug: skipping mutate, seed", seed)
+			continue
+		}
+
+		if elementType > 7 {
 			byteLength := uint32(elementType) / 8
 			// fmt.Println("CuEVM Debug: mutating byte array, seed", seed)
 			seed = (a*seed + c) % m

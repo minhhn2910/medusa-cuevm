@@ -226,7 +226,7 @@ func (g *CallSequenceGenerator) InitializeNextSequence() (bool, error) {
 	// If this provider has no corpus mutation methods or corpus call sequences, we return a call sequence with
 	// nil elements to signal that we want an entirely new sequence.
 	if g.mutationStrategyChooser.ChoiceCount() == 0 || g.worker.fuzzer.corpus.ActiveMutableSequenceCount() == 0 {
-		fmt.Println("CuEVM Debug: no corpus mutation methods or corpus call sequences")
+		// fmt.Println("CuEVM Debug: no corpus mutation methods or corpus call sequences")
 		return true, nil
 	}
 
@@ -377,8 +377,6 @@ func (g *CallSequenceGenerator) seedSequenceElementCache() {
 			}
 		}
 
-		fmt.Println("CuEVM Debug: method.Method.Inputs", method.Method.Inputs)
-		fmt.Println("CuEVM Debug: args", args)
 		msg, markers := calls.NewCallMessageWithAbiValueDataAndMask(selectedSender, &method.Address, 0, big_zero, g.worker.fuzzer.config.Fuzzing.TransactionGasLimit, big_one, big_zero, big_zero, &calls.CallMessageDataAbiValues{
 			Method:      &method.Method,
 			InputValues: args,

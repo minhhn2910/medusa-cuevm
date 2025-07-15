@@ -215,6 +215,8 @@ func (d *CallMessageDataAbiValues) PackWithMask() ([]byte, []DataMarker, error) 
 		switch typ.T {
 		case abi.IntTy, abi.UintTy:
 			markers = append(markers, DataMarker{Offset: offset, Type: DataType(typ.Size), Length: 32})
+		case abi.BoolTy:
+			markers = append(markers, DataMarker{Offset: offset, Type: DataTypeBool, Length: 32})
 		case abi.AddressTy:
 			markers = append(markers, DataMarker{Offset: offset, Type: DataTypeAddress, Length: 32})
 		case abi.TupleTy:
