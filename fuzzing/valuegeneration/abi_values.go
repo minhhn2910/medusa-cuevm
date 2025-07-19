@@ -22,7 +22,7 @@ const addressJSONContractNameOverridePrefix = "DeployedContract:"
 
 // GenerateAbiValue generates a value of the provided abi.Type using the provided ValueGenerator.
 // The generated value is returned.
-func GenerateAbiValue(generator ValueGenerator, inputType *abi.Type) any {
+func GenerateAbiValueWithArrayLength(generator ValueGenerator, inputType *abi.Type, arrayLength int) any {
 	// Determine the type of value to generate based on the ABI type.
 	switch inputType.T {
 	case abi.AddressTy:
@@ -75,7 +75,11 @@ func GenerateAbiValue(generator ValueGenerator, inputType *abi.Type) any {
 		return array.Interface()
 	case abi.SliceTy:
 		// Dynamic sized arrays are represented as slices.
-		sliceSize := generator.GenerateArrayOfLength()
+		sliceSize := arrayLength
+		if sliceSize < 0 {
+			sliceSize = generator.GenerateArrayOfLength()
+		}
+		// sliceSize := generator.GenerateArrayOfLength()
 		slice := reflect.MakeSlice(inputType.GetType(), sliceSize, sliceSize)
 		for i := 0; i < slice.Len(); i++ {
 			slice.Index(i).Set(reflect.ValueOf(GenerateAbiValue(generator, inputType.Elem)))
@@ -101,6 +105,11 @@ func GenerateAbiValue(generator ValueGenerator, inputType *abi.Type) any {
 		logging.GlobalLogger.Panic("Failed to generate abi value", err)
 		return nil
 	}
+}
+
+// The generated value is returned.
+func GenerateAbiValue(generator ValueGenerator, inputType *abi.Type) any {
+	return GenerateAbiValueWithArrayLength(generator, inputType, -1)
 }
 
 // MutateAbiValue takes an ABI packable input value, alongside its type definition and a value generator, to mutate

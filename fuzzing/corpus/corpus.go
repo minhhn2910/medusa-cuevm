@@ -11,6 +11,7 @@ import (
 
 	"github.com/crytic/medusa-geth/common"
 	"github.com/crytic/medusa/chain"
+	"github.com/crytic/medusa/compilation/types"
 	"github.com/crytic/medusa/fuzzing/calls"
 	"github.com/crytic/medusa/fuzzing/coverage"
 	"github.com/crytic/medusa/logging"
@@ -484,16 +485,66 @@ func (c *Corpus) CheckSequenceCoverageAndUpdate(callSequence calls.CallSequence,
 	if err != nil {
 		return err
 	}
-	// fmt.Println("Medusa: coverage after update")
-	// fmt.Println(c.coverageMaps.DebugString())
+
 	// If we had an increase in coverage, we save the sequence.
 	if coverageUpdated {
 		// fmt.Println("\nMedusa: coverage updated\n")
+		// fmt.Println("Medusa: coverage after update")
+		// fmt.Println(c.coverageMaps.DebugString())
 		// If we achieved new coverage, save this sequence for mutation purposes.
 		err = c.addCallSequence(c.callSequenceFiles, callSequence, true, mutationChooserWeight, flushImmediately)
 		if err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// debug, to be deleted
+func (c *Corpus) CheckSequenceCoverageAndUpdateDebug(callSequence calls.CallSequence, mutationChooserWeight *big.Int, flushImmediately bool, compilations []types.Compilation) error {
+	// fmt.Println("\nMedusa: CheckSequenceCoverageAndUpdate\n")
+	// If we have coverage-guided fuzzing disabled or no calls in our sequence, there is nothing to do.
+	if len(callSequence) == 0 {
+		return nil
+	}
+
+	// Obtain our coverage maps for our last call.
+	lastCall := callSequence[len(callSequence)-1]
+	lastCallChainReference := lastCall.ChainReference
+	lastMessageResult := lastCallChainReference.Block.MessageResults[lastCallChainReference.TransactionIndex]
+
+	lastMessageCoverageMaps := coverage.GetCoverageTracerResults(lastMessageResult)
+	// fmt.Println("\nMedusa: lastMessageCoverageMaps\n")
+	// fmt.Println(lastMessageCoverageMaps.DebugString())
+	// If we have none, because a coverage tracer wasn't attached when processing this call, we can stop.
+	if lastMessageCoverageMaps == nil {
+		return nil
+	}
+
+	// Memory optimization: Remove them from the results now that we obtained them, to free memory later.
+	// coverage.RemoveCoverageTracerResults(lastMessageResult)
+	// fmt.Println("Medusa: coverage before update")
+	// fmt.Println(c.coverageMaps.DebugString())
+	// Merge the coverage maps into our total coverage maps and check if we had an update.
+	coverageUpdated, err := c.coverageMaps.Update(lastMessageCoverageMaps)
+	if err != nil {
+		return err
+	}
+
+	// If we had an increase in coverage, we save the sequence.
+	if coverageUpdated {
+		// fmt.Println("\nMedusa: coverage updated\n")
+		// fmt.Println("Medusa: coverage after update")
+		// fmt.Println(c.coverageMaps.DebugString())
+		// uniquePCs, _ := coverage.GetUniquePCsCount(compilations, c.coverageMaps, c.logger, false)
+
+		// fmt.Println("\n\nMEDUSA_UNIQUE_PC_COUNT:", uniquePCs, "\n\n")
+
+		// If we achieved new coverage, save this sequence for mutation purposes.
+		// err = c.addCallSequence(c.callSequenceFiles, callSequence, true, mutationChooserWeight, flushImmediately)
+		// if err != nil {
+		// 	return err
+		// }
 	}
 	return nil
 }
@@ -510,7 +561,8 @@ func (c *Corpus) ExtractAllSequences() []calls.CallSequence {
 	for _, file := range c.callSequenceFiles.files {
 		callSequencesToTest = append(callSequencesToTest, file.data)
 	}
-	c.mutationTargetSequenceChooser.PrintChoices()
+	// c.mutationTargetSequenceChooser.PrintChoices()
+	fmt.Println("\n\n Medusa: ExtractAllSequences\n\n")
 	return callSequencesToTest
 }
 

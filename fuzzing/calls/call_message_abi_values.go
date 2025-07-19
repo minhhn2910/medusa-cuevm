@@ -3,6 +3,7 @@ package calls
 import (
 	"encoding/json"
 	"fmt"
+	"math/big"
 
 	"github.com/crytic/medusa-geth/accounts/abi"
 	"github.com/crytic/medusa-geth/common"
@@ -138,6 +139,145 @@ func (d *CallMessageDataAbiValues) Pack() ([]byte, error) {
 	return callData, nil
 }
 
+// PackWithMask packs all the ABI argument InputValues into call data and generates a list of markers indicating
+// the offset, type, and length of each integer or address argument. The mask is a slice of DataMarker.
+func (d *CallMessageDataAbiValues) PackWithMask() ([]byte, []DataMarker, error) {
+	if d.Method == nil {
+		return nil, nil, fmt.Errorf("ABI call data packing failed, method definition was not set at runtime")
+	}
+	if len(d.Method.Inputs) != len(d.InputValues) {
+		return nil, nil, fmt.Errorf("ABI call data packing failed, method definition describes %d input arguments, but %d were provided", len(d.Method.Inputs), len(d.InputValues))
+	}
+
+	// This function is a reimplementation of abi.Arguments.Pack, with marker generation added.
+	// It works in two passes:
+	// 1. Pack all arguments into a single byte slice (`argData`), correctly handling head/tail placement.
+	// 2. Walk the type structure and read offsets from the generated `argData` to create markers.
+
+	var head, tail []byte
+	var markers []DataMarker
+
+	abiArgs := d.Method.Inputs
+	args := d.InputValues
+
+	// add special marker for Value muation
+	if d.Method.IsPayable() {
+		markers = append(markers, DataMarker{Offset: 0, Type: DataTypeValue, Length: 32})
+	}
+	// --- Pass 1: Pack arguments and build argData ---
+
+	initialTailOffset := 0
+	for _, arg := range abiArgs {
+		initialTailOffset += getTypeSize(arg.Type)
+	}
+
+	// packSingleArg packs one argument. For dynamic types, it returns just the tail data,
+	// stripping the 32-byte offset prefix that `abi.Arguments.Pack` adds for a single arg.
+	packSingleArg := func(arg abi.Argument, value interface{}) ([]byte, error) {
+		packed, err := abi.Arguments{arg}.Pack(value)
+		if err != nil {
+			return nil, err
+		}
+		if isDynamicType(arg.Type) {
+			return packed[32:], nil
+		}
+		return packed, nil
+	}
+
+	packedTails := make([][]byte, len(abiArgs))
+	currentTailOffset := initialTailOffset
+	for i, arg := range abiArgs {
+		packed, err := packSingleArg(arg, args[i])
+		if err != nil {
+			return nil, nil, err
+		}
+
+		if isDynamicType(arg.Type) {
+			head = append(head, common.LeftPadBytes(big.NewInt(int64(currentTailOffset)).Bytes(), 32)...)
+			packedTails[i] = packed // Defer append to tail
+			currentTailOffset += len(packed)
+		} else {
+			head = append(head, packed...)
+		}
+	}
+
+	for _, packed := range packedTails {
+		if packed != nil {
+			tail = append(tail, packed...)
+		}
+	}
+	argData := append(head, tail...)
+
+	// --- Pass 2: Generate markers using the final argData ---
+
+	var walkAndMark func(typ abi.Type, offset int)
+	walkAndMark = func(typ abi.Type, offset int) {
+		switch typ.T {
+		case abi.IntTy, abi.UintTy:
+			markers = append(markers, DataMarker{Offset: offset, Type: DataType(typ.Size), Length: 32})
+		case abi.BoolTy:
+			markers = append(markers, DataMarker{Offset: offset, Type: DataTypeBool, Length: 32})
+		case abi.AddressTy:
+			markers = append(markers, DataMarker{Offset: offset, Type: DataTypeAddress, Length: 32})
+		case abi.TupleTy:
+			elemOffset := 0
+			for _, elemTyp := range typ.TupleElems {
+				fieldOffset := offset + elemOffset
+				if isDynamicType(*elemTyp) {
+					dynamicElemOffset := int(common.BytesToHash(argData[fieldOffset : fieldOffset+32]).Big().Int64())
+					walkAndMark(*elemTyp, offset+dynamicElemOffset)
+					elemOffset += 32
+				} else {
+					walkAndMark(*elemTyp, fieldOffset)
+					elemOffset += getTypeSize(*elemTyp)
+				}
+			}
+		case abi.SliceTy: // Dynamic Array
+			length := int(common.BytesToHash(argData[offset : offset+32]).Big().Int64())
+			elemDataStart := offset + 32
+			elemSize := getTypeSize(*typ.Elem)
+			for i := 0; i < length; i++ {
+				elemPos := elemDataStart + (i * elemSize)
+				if isDynamicType(*typ.Elem) {
+					dynamicElemOffset := int(common.BytesToHash(argData[elemPos : elemPos+32]).Big().Int64())
+					walkAndMark(*typ.Elem, offset+dynamicElemOffset)
+				} else {
+					walkAndMark(*typ.Elem, elemPos)
+				}
+			}
+		case abi.ArrayTy: // Static Array
+			elemSize := getTypeSize(*typ.Elem)
+			for i := 0; i < typ.Size; i++ {
+				walkAndMark(*typ.Elem, offset+(i*elemSize))
+			}
+		}
+	}
+
+	headReadOffset := 0
+	for _, arg := range abiArgs {
+		if isDynamicType(arg.Type) {
+			dynamicOffset := int(common.BytesToHash(argData[headReadOffset : headReadOffset+32]).Big().Int64())
+			walkAndMark(arg.Type, dynamicOffset)
+			headReadOffset += 32
+		} else {
+			walkAndMark(arg.Type, headReadOffset)
+			headReadOffset += getTypeSize(arg.Type)
+		}
+	}
+
+	// Adjust all marker offsets by 4 bytes for the method ID.
+	if d.Method.Sig != "CuEVM::fallback()" {
+		for i := range markers {
+			markers[i].Offset += 4
+		}
+	}
+	// CuEVM: decode and pack tempoarily fixed first 4 bytes for fallback and receive
+
+	finalCallData := append(d.Method.ID, argData...)
+
+	return finalCallData, markers, nil
+}
+
 // MarshalJSON provides custom JSON marshalling for the struct.
 // Returns the JSON marshalled data, or an error if one occurs.
 func (d *CallMessageDataAbiValues) MarshalJSON() ([]byte, error) {
@@ -181,4 +321,38 @@ func (d *CallMessageDataAbiValues) UnmarshalJSON(b []byte) error {
 	d.methodSignature = marshalData.MethodSignature
 	d.encodedInputValues = marshalData.EncodedInputValues
 	return nil
+}
+
+// Helper functions cloned from argument.go for compatibility
+
+// isDynamicType returns true if the type is dynamic
+func isDynamicType(t abi.Type) bool {
+	if t.T == abi.TupleTy {
+		for _, elem := range t.TupleElems {
+			if isDynamicType(*elem) {
+				return true
+			}
+		}
+		return false
+	}
+	return t.T == abi.StringTy || t.T == abi.BytesTy || t.T == abi.SliceTy || (t.T == abi.ArrayTy && isDynamicType(*t.Elem))
+}
+
+// getTypeSize returns the size of a type in bytes
+func getTypeSize(t abi.Type) int {
+	if t.T == abi.ArrayTy && !isDynamicType(t) {
+		// Static arrays: size = element_size * length
+		if t.Size >= 0 {
+			return getTypeSize(*t.Elem) * t.Size
+		}
+	} else if t.T == abi.TupleTy && !isDynamicType(t) {
+		// Static tuples: sum of all element sizes
+		total := 0
+		for _, elem := range t.TupleElems {
+			total += getTypeSize(*elem)
+		}
+		return total
+	}
+	// For all other types (including dynamic types), return 32 bytes (one slot)
+	return 32
 }

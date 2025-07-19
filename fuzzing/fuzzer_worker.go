@@ -4,9 +4,12 @@ import (
 	"fmt"
 	"math/big"
 	"math/rand"
+	"sort"
+	"sync"
 
 	"github.com/crytic/medusa/logging/colors"
 
+	"github.com/crytic/medusa-geth/accounts/abi"
 	"github.com/crytic/medusa-geth/common"
 	"github.com/crytic/medusa/chain"
 	"github.com/crytic/medusa/fuzzing/calls"
@@ -50,6 +53,10 @@ type FuzzerWorker struct {
 	// before the execution of the next call sequence.
 	shrinkCallSequenceRequests []ShrinkCallSequenceRequest
 
+	// CuEVM async equivalent of shrinkCallSequenceRequests
+	shrinkRequestChan chan ShrinkCallSequenceRequest
+	shrinkWg          sync.WaitGroup
+
 	// randomProvider provides random data as inputs to decisions throughout the worker.
 	randomProvider *rand.Rand
 	// sequenceGenerator creates entirely new or mutated call sequences based on corpus call sequences, for use in
@@ -87,6 +94,12 @@ type FuzzerWorker struct {
 
 	// callSequenceElements []*calls.CallSequenceElement
 	callSequenceElements [][]*calls.CallSequenceElement
+
+	// CuEVM, cache sequence element for each static ABI method
+	staticABICallElementCache  map[string][]byte
+	staticABIDataABIValues     map[string]calls.CallMessageDataAbiValues
+	staticABIMarkerOffsetCache map[string]int
+	signatureToMethodMap       map[string]*fuzzerTypes.DeployedContractMethod
 }
 
 // newFuzzerWorker creates a new FuzzerWorker, assigning it the provided worker index/id and associating it to the
@@ -117,13 +130,73 @@ func newFuzzerWorker(fuzzer *Fuzzer, workerIndex int, randomProvider *rand.Rand)
 		pureMethods:                make([]fuzzerTypes.DeployedContractMethod, 0),
 		shrinkCallSequenceRequests: make([]ShrinkCallSequenceRequest, 0),
 		coverageTracer:             nil,
+		staticABICallElementCache:  make(map[string][]byte),
+		staticABIMarkerOffsetCache: make(map[string]int),
+		staticABIDataABIValues:     make(map[string]calls.CallMessageDataAbiValues),
 		randomProvider:             randomProvider,
 		valueSet:                   valueSet,
 	}
 	worker.sequenceGenerator = NewCallSequenceGenerator(worker, callSequenceGenConfig)
 	worker.shrinkingValueMutator = shrinkingValueMutator
 
+	worker.shrinkRequestChan = make(chan ShrinkCallSequenceRequest, 32)
+	worker.shrinkWg.Add(1)
+	go worker.shrinkCallSequenceAsyncLoop()
 	return worker, nil
+}
+
+func (fw *FuzzerWorker) initializeABICache() {
+	fmt.Println("CuEVM Debug: constructing staticABICallElementCache")
+
+	for i := 0; i < len(fw.fuzzer.staticABICallData); i++ {
+		clonedData := make([]byte, len(fw.fuzzer.staticABICallData[i]))
+		copy(clonedData, fw.fuzzer.staticABICallData[i])
+		fw.staticABICallElementCache[fw.fuzzer.staticABISignature[i]] = clonedData
+		fw.staticABIMarkerOffsetCache[fw.fuzzer.staticABISignature[i]] = int(fw.fuzzer.staticABIMarkerOffset[i])
+		if clonedVal, err := fw.fuzzer.staticABIDataABIValues[i].Clone(); err == nil && clonedVal != nil {
+			fw.staticABIDataABIValues[fw.fuzzer.staticABISignature[i]] = *clonedVal
+		} else {
+			// Handle error or nil case if needed, or log
+			fmt.Println("CuEVM Debug: error cloning ABI value", err)
+		}
+	}
+	// setup mapping from signature to method
+	fw.signatureToMethodMap = make(map[string]*fuzzerTypes.DeployedContractMethod)
+	for _, method := range fw.stateChangingMethods {
+		fw.signatureToMethodMap[method.Method.Sig] = &method
+	}
+	for _, method := range fw.pureMethods {
+		fw.signatureToMethodMap[method.Method.Sig] = &method
+	}
+
+	// Pre-allocate callSequenceElements for reuse
+	fw.callSequenceElements = make([][]*calls.CallSequenceElement, fw.fuzzer.sequencesPerCPUWorker)
+	for i := range fw.callSequenceElements {
+		fw.callSequenceElements[i] = make([]*calls.CallSequenceElement, fw.fuzzer.config.Fuzzing.CallSequenceLength)
+	}
+
+	// fmt.Println("CuEVM Debug: staticABICallElementCache", fw.staticABICallElementCache)
+	// fmt.Println("CuEVM Debug: staticABIMarkerOffsetCache", fw.staticABIMarkerOffsetCache)
+	// fmt.Println("CuEVM Debug: staticABIDataABIValues", fw.staticABIDataABIValues)
+	// for sig, data := range fw.staticABIDataABIValues {
+	// 	fmt.Println("CuEVM Debug: sig", sig, "data", data.InputValues)
+	// }
+	// fmt.Println("CuEVM Debug: signatureToMethodMap", fw.signatureToMethodMap)
+	fmt.Println("\n\nCuEVM Debug: end of initializeABICache\n\n")
+}
+
+// The async loop (only one per worker):
+func (fw *FuzzerWorker) shrinkCallSequenceAsyncLoop() {
+	defer fw.shrinkWg.Done()
+
+	for req := range fw.shrinkRequestChan {
+		// fmt.Println("CuEVM Debug: shrinkCallSequenceAsyncLoop req", req)
+		fw.chain.RevertToBlockIndex(fw.testingBaseBlockIndex)
+		_, err := fw.shrinkCallSequence(req)
+		if err != nil {
+			fmt.Println("shrinkCallSequence error:", err)
+		}
+	}
 }
 
 // WorkerIndex returns the index of this FuzzerWorker in relation to its parent Fuzzer.
@@ -277,7 +350,32 @@ func (fw *FuzzerWorker) updateMethods() {
 				fw.stateChangingMethods = append(fw.stateChangingMethods, fuzzerTypes.DeployedContractMethod{Address: contractAddress, Contract: contractDefinition, Method: method})
 			}
 		}
+		fallback := contractDefinition.CompiledContract().Abi.Fallback
+		fallback.Name = "fallback"
+		fallback.Sig = "CuEVM::fallback()"
+		newtype, _ := abi.NewType("uint256", "", []abi.ArgumentMarshaling{})
+		fallback.Inputs = abi.Arguments{abi.Argument{
+			Name: "input",
+			Type: newtype,
+		}}
+		fallback.Payable = true
+		// this one represent both fallback and receive
+
+		// Add them to "pureMethods" for less frequent mutation
+		fw.pureMethods = append(fw.pureMethods, fuzzerTypes.DeployedContractMethod{Address: contractAddress, Contract: contractDefinition, Method: fallback})
+		// fw.pureMethods = append(fw.pureMethods, fuzzerTypes.DeployedContractMethod{Address: contractAddress, Contract: contractDefinition, Method: receive})
+
 	}
+
+	// CuEVM Debug: sort methods by name for deterministic order
+	// Sort both arrays by method name for deterministic order
+	sort.Slice(fw.pureMethods, func(i, j int) bool {
+		return fw.pureMethods[i].Method.Name < fw.pureMethods[j].Method.Name
+	})
+
+	sort.Slice(fw.stateChangingMethods, func(i, j int) bool {
+		return fw.stateChangingMethods[i].Method.Name < fw.stateChangingMethods[j].Method.Name
+	})
 }
 
 // testNextCallSequence tests a call message sequence against the underlying FuzzerWorker's Chain and calls every
@@ -464,12 +562,15 @@ func (fw *FuzzerWorker) testShrunkenCallSequence(possibleShrunkSequence calls.Ca
 func (fw *FuzzerWorker) shrinkCallSequence(shrinkRequest ShrinkCallSequenceRequest) (calls.CallSequence, error) {
 	// Define a variable to track our most optimized sequence across all optimization iterations.
 	optimizedSequence := shrinkRequest.CallSequenceToShrink
-	fmt.Println("CuEVM Debug: shrinkCallSequence start")
+	// for _, element := range optimizedSequence {
+	// 	element.Call.FillFromTestChainProperties(fw.chain)
+	// }
+	fmt.Println("CuEVM Debug: shrinkCallSequence start, shrinkLimit", fw.fuzzer.config.Fuzzing.ShrinkLimit)
 	// Obtain our shrink limits and begin shrinking.
 	shrinkIteration := uint64(0)
-	shrinkLimit := fw.fuzzer.config.Fuzzing.ShrinkLimit
+	// shrinkLimit := fw.fuzzer.config.Fuzzing.ShrinkLimit
 	// TODO: March 2025 temporarily disable shrinking, todo: reenable
-	// shrinkLimit := uint64(0)
+	shrinkLimit := uint64(0)
 	shrinkingEnded := func() bool {
 		return shrinkIteration >= shrinkLimit || utils.CheckContextDone(fw.fuzzer.emergencyCtx)
 	}
