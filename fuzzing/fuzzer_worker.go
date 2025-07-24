@@ -55,7 +55,9 @@ type FuzzerWorker struct {
 
 	// CuEVM async equivalent of shrinkCallSequenceRequests
 	shrinkRequestChan chan ShrinkCallSequenceRequest
-	shrinkWg          sync.WaitGroup
+	// Channel for adding sequences to corpus asynchronously
+	addSequenceCorpusChan chan AddSequenceCorpusRequest
+	shrinkWg              sync.WaitGroup
 
 	// randomProvider provides random data as inputs to decisions throughout the worker.
 	randomProvider *rand.Rand
@@ -140,13 +142,14 @@ func newFuzzerWorker(fuzzer *Fuzzer, workerIndex int, randomProvider *rand.Rand)
 	worker.shrinkingValueMutator = shrinkingValueMutator
 
 	worker.shrinkRequestChan = make(chan ShrinkCallSequenceRequest, 32)
+	worker.addSequenceCorpusChan = make(chan AddSequenceCorpusRequest, 100)
 	worker.shrinkWg.Add(1)
-	go worker.shrinkCallSequenceAsyncLoop()
+	go worker.addCallSequenceCorpusLoop()
 	return worker, nil
 }
 
 func (fw *FuzzerWorker) initializeABICache() {
-	fmt.Println("CuEVM Debug: constructing staticABICallElementCache")
+	// fmt.Println("CuEVM Debug: constructing staticABICallElementCache")
 
 	for i := 0; i < len(fw.fuzzer.staticABICallData); i++ {
 		clonedData := make([]byte, len(fw.fuzzer.staticABICallData[i]))
@@ -182,7 +185,7 @@ func (fw *FuzzerWorker) initializeABICache() {
 	// 	fmt.Println("CuEVM Debug: sig", sig, "data", data.InputValues)
 	// }
 	// fmt.Println("CuEVM Debug: signatureToMethodMap", fw.signatureToMethodMap)
-	fmt.Println("\n\nCuEVM Debug: end of initializeABICache\n\n")
+	// fmt.Println("\n\nCuEVM Debug: end of initializeABICache\n\n")
 }
 
 // The async loop (only one per worker):
@@ -195,6 +198,44 @@ func (fw *FuzzerWorker) shrinkCallSequenceAsyncLoop() {
 		_, err := fw.shrinkCallSequence(req)
 		if err != nil {
 			fmt.Println("shrinkCallSequence error:", err)
+		}
+	}
+}
+
+func (fw *FuzzerWorker) addCallSequenceCorpusLoop() {
+	defer fw.shrinkWg.Done()
+	for req := range fw.addSequenceCorpusChan {
+		// fmt.Println("\n\nCuEVM Debug: addCallSequenceCorpusLoop req \n\n", req)
+		// Revert to base state before executing
+		err := fw.chain.RevertToBlockIndex(fw.testingBaseBlockIndex)
+		if err != nil {
+			fmt.Println("Failed to revert chain to base state:", err)
+			continue
+		}
+
+		// Create execution check function for recording coverage
+		executionCheckFunc := func(currentlyExecutedSequence calls.CallSequence) (bool, error) {
+			err := fw.fuzzer.corpus.CheckSequenceCoverageAndUpdate(currentlyExecutedSequence, fw.getNewCorpusCallSequenceWeight(), true)
+			if err != nil {
+				return true, err
+			}
+			return false, nil
+		}
+
+		// Execute the sequence
+		_, err = calls.SimulateExecuteCallSequenceGPUWithList(
+			fw.chain,
+			req.Sequence,
+			executionCheckFunc,
+		)
+		if err != nil {
+			fmt.Println("Failed to execute sequence:", err)
+		}
+
+		// Add to corpus after execution
+		err = fw.fuzzer.corpus.AddCallSequence(req.Sequence, req.Weight)
+		if err != nil {
+			fmt.Println("Failed to add sequence to corpus:", err)
 		}
 	}
 }

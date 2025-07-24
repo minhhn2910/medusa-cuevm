@@ -27,6 +27,7 @@ const (
 	CHANCE_TO_CREATE_NEW_INTEGER          = 2
 	CHANCE_TO_CREATE_NEW_ADDRESS          = 0
 	CHANCE_TO_SKIP_MUTATE                 = 50
+	CHANCE_TO_SMALL_DELTA                 = 5
 	VALUE_MUTATE_INT32                    = 7
 	VALUE_CHANCE_TO_STOP_INT_32           = 30
 
@@ -185,6 +186,15 @@ func RestoreMutation(data []byte, dataMarkers []calls.DataMarker, sequenceIdx, e
 		randomChance := seed % 100
 		if randomChance <= CHANCE_TO_SKIP_MUTATE {
 			// fmt.Println("CuEVM Debug: skipping mutate, seed", seed)
+			if elementType > 7 {
+				// mutate the marker data
+				seed = (a*seed + c) % m
+				randomChance = seed % 100
+				if randomChance <= CHANCE_TO_SMALL_DELTA {
+					// do small delta mutation
+					seed = MutateByteArray(slice, elementLength, 1, seed, false, fuzzerConfig.IntegerConstants)
+				}
+			}
 			continue
 		}
 
