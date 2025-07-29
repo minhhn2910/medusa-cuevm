@@ -80,4 +80,6 @@ type AddSequenceCorpusRequest struct {
 	Sequence calls.CallSequence
 	// Weight represents the weight to assign to this sequence in the corpus
 	Weight *big.Int
+	// CoverageId represents the coverage ID for potential replacement logic
+	CoverageId *uint32
 }

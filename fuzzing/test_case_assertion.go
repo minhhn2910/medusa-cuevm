@@ -53,8 +53,9 @@ type AssertionTestCase struct {
 	// bugPC describes the PC of the bug
 	bugPC uint32 `json:"bugPC"`
 	// bugType describes the type of the bug
-	bugType uint32  `json:"bugType"`
-	bugTime float64 `json:"bugTime"`
+	bugType         uint32  `json:"bugType"`
+	bugContractName string  `json:"bugContractName"`
+	bugTime         float64 `json:"bugTime"`
 }
 
 // Status describes the TestCaseStatus used to define the current state of the test.
@@ -110,19 +111,21 @@ func (t *AssertionTestCase) ID() string {
 func (t *AssertionTestCase) MarshalJSON() ([]byte, error) {
 	// Create a struct with exported fields for JSON marshaling
 	return json.Marshal(struct {
-		TargetMethod string              `json:"method"`
-		CallSequence *calls.CallSequence `json:"callSequence"`
-		BugPC        uint32              `json:"bugPC"`
-		BugType      string              `json:"bugType"`
-		BugTime      string              `json:"bugTime"`
-		ID           string              `json:"id"`
+		TargetMethod    string              `json:"method"`
+		CallSequence    *calls.CallSequence `json:"callSequence"`
+		BugPC           uint32              `json:"bugPC"`
+		BugType         string              `json:"bugType"`
+		BugContractName string              `json:"bugContractName"`
+		BugTime         string              `json:"bugTime"`
+		ID              string              `json:"id"`
 	}{
 
-		TargetMethod: t.targetMethod.Sig,
-		CallSequence: t.callSequence,
-		BugPC:        t.bugPC,
-		BugType:      bugTypeName(t.bugType),
-		BugTime:      strconv.FormatFloat(t.bugTime, 'f', 2, 64),
-		ID:           t.ID(),
+		TargetMethod:    t.targetMethod.Sig,
+		CallSequence:    t.callSequence,
+		BugPC:           t.bugPC,
+		BugType:         bugTypeName(t.bugType),
+		BugContractName: t.bugContractName,
+		BugTime:         strconv.FormatFloat(t.bugTime, 'f', 2, 64),
+		ID:              t.ID(),
 	})
 }

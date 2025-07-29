@@ -713,10 +713,10 @@ func (g *CallSequenceGenerator) generateNewElementWithMutationMask(candidate_poo
 		if (len(g.worker.pureMethods) > 0 && g.worker.randomProvider.Intn(100) == 1) || callOnlyPureFunctions {
 			// if (len(g.worker.pureMethods) > 0 && g.worker.randomProvider.Intn(1000) == 0) || callOnlyPureFunctions {
 			selectedMethod = &g.worker.pureMethods[g.worker.randomProvider.Intn(len(g.worker.pureMethods))]
-			if selectedMethod.Method.Sig == "CuEVM::fallback()" && (g.worker.randomProvider.Intn(20) != 1) {
-				// lower chance to select fallback
-				selectedMethod = &g.worker.pureMethods[g.worker.randomProvider.Intn(len(g.worker.pureMethods))]
-			}
+			// if selectedMethod.Method.Sig == "CuEVM::fallback()" && (g.worker.randomProvider.Intn(20) != 1) {
+			// 	// lower chance to select fallback
+			// 	selectedMethod = &g.worker.pureMethods[g.worker.randomProvider.Intn(len(g.worker.pureMethods))]
+			// }
 		} else {
 			selectedMethod = &g.worker.stateChangingMethods[g.worker.randomProvider.Intn(len(g.worker.stateChangingMethods))]
 		}
@@ -724,7 +724,7 @@ func (g *CallSequenceGenerator) generateNewElementWithMutationMask(candidate_poo
 	}
 
 	// fmt.Println("CuEVM Debug: selectedMethod", selectedMethod)
-	// fmt.Println("CuEVM Debug: selectedMethod.Method.Sig", selectedMethod.Method.Sig)
+	// fmt.Println("\n\nCuEVM Debug: selectedMethod.Method.Sig", selectedMethod.Method.Sig)
 	// Select a random sender
 	selectedSender := g.worker.fuzzer.senders[g.worker.randomProvider.Intn(len(g.worker.fuzzer.senders))]
 	// If this is a payable function, generate value to send

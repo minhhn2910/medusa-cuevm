@@ -16,13 +16,25 @@ type WeightedRandomChoice[T any] struct {
 	// weight describes a value indicating the likelihood of this WeightedRandomChoice to appear in a random selection.
 	// Its probability is calculated as current weight / all weights in a WeightedRandomChooser.
 	weight *big.Int
+
+	uniqueId uint32
 }
 
 // NewWeightedRandomChoice creates a WeightedRandomChoice with the given underlying data and weight to use when added to a WeightedRandomChooser.
 func NewWeightedRandomChoice[T any](data T, weight *big.Int) *WeightedRandomChoice[T] {
 	return &WeightedRandomChoice[T]{
-		Data:   data,
-		weight: new(big.Int).Set(weight),
+		Data:     data,
+		weight:   new(big.Int).Set(weight),
+		uniqueId: 0, // Default uniqueId for compatibility
+	}
+}
+
+// NewWeightedRandomChoiceWithId creates a WeightedRandomChoice with the given underlying data, weight, and uniqueId.
+func NewWeightedRandomChoiceWithId[T any](data T, weight *big.Int, uniqueId uint32) *WeightedRandomChoice[T] {
+	return &WeightedRandomChoice[T]{
+		Data:     data,
+		weight:   new(big.Int).Set(weight),
+		uniqueId: uniqueId,
 	}
 }
 
@@ -69,8 +81,28 @@ func (c *WeightedRandomChooser[T]) PrintChoices() {
 	for _, choice := range c.choices {
 		fmt.Printf("choice data: %v\n", choice.Data)
 		fmt.Printf("choice weight: %v\n", choice.weight)
+		fmt.Printf("choice uniqueId: %v\n", choice.uniqueId)
 		fmt.Println()
 	}
+}
+
+// RemoveChoiceByUniqueId removes a choice with the specified uniqueId from the chooser
+func (c *WeightedRandomChooser[T]) RemoveChoiceByUniqueId(uniqueId uint32) bool {
+	// Acquire our lock during the duration of this method.
+	c.randomProviderLock.Lock()
+	defer c.randomProviderLock.Unlock()
+
+	// Find and remove the choice with matching uniqueId
+	for i, choice := range c.choices {
+		if choice.uniqueId == uniqueId {
+			// Subtract the weight from total
+			c.totalWeight = new(big.Int).Sub(c.totalWeight, choice.weight)
+			// Remove the choice from slice
+			c.choices = append(c.choices[:i], c.choices[i+1:]...)
+			return true
+		}
+	}
+	return false
 }
 
 // AddChoices adds weighted choices to the WeightedRandomChooser, allowing for future random selection.

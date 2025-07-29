@@ -271,7 +271,7 @@ func (t *AssertionTestCaseProvider) GPUPostCallTest(workers []*FuzzerWorker, gpu
 			rawIdx := int(gpuResult.NewBugThreadIdx[batchIdx][idx]) / skipSequenceSize
 			rawPC := gpuResult.NewBugPCs[batchIdx][idx]
 			bugType := gpuResult.NewBugTypes[batchIdx][idx]
-
+			bugContractId := gpuResult.NewBugContractIds[batchIdx][idx]
 			workerIdx := rawIdx / t.fuzzer.sequencesPerCPUWorker
 			sequenceIdx := rawIdx % t.fuzzer.sequencesPerCPUWorker
 			elementIdx := batchIdx
@@ -418,19 +418,21 @@ func (t *AssertionTestCaseProvider) GPUPostCallTest(workers []*FuzzerWorker, gpu
 			*/
 			// general bugs including assertion failure, to be exported to json later
 			{
-				bug_id := rawPC<<16 | bugType
+				bug_id := rawPC<<16 | bugType<<8 | (bugContractId & 0xFF)
+				// fmt.Println("CuEVM Debug: bug_id", hex.EncodeToString(big.NewInt(int64(bug_id)).Bytes()))
 				if _, exists := t.generalBugs[bug_id]; exists {
 					continue
 				}
 				// RegisterTestCase registers a new TestCase with the Fuzzer.
 				testCase := &AssertionTestCase{
-					status:         TestCaseStatusFailed,
-					targetContract: lastCall.Contract,
-					targetMethod:   *lastCallMethod,
-					bugType:        bugType,
-					bugPC:          rawPC,
-					callSequence:   &fullSequence,
-					bugTime:        time.Since(t.fuzzer.fuzzStartTime).Seconds(), // seconds
+					status:          TestCaseStatusFailed,
+					targetContract:  lastCall.Contract,
+					targetMethod:    *lastCallMethod,
+					bugType:         bugType,
+					bugPC:           rawPC,
+					bugContractName: t.fuzzer.contractIdToName[bugContractId],
+					callSequence:    &fullSequence,
+					bugTime:         time.Since(t.fuzzer.fuzzStartTime).Seconds(), // seconds
 				}
 				t.fuzzer.RegisterTestCase(testCase)
 				t.generalBugs[bug_id] = testCase
@@ -473,8 +475,8 @@ func (t *AssertionTestCaseProvider) getAllBugReported() []*AssertionTestCase {
 	}
 	fmt.Printf("CuEVM Debug: Found %d bugs:\n", len(bugs))
 	for i, bug := range bugs {
-		fmt.Printf("  CuEVM_BUG_REPORT %d: Type=%d, PC=%d, Time=%f\n",
-			i, bug.bugType, bug.bugPC, bug.bugTime)
+		fmt.Printf("  CuEVM_BUG_REPORT %d: Contract=%s, Method=%s, Type=%d, PC=%d, Time=%f\n",
+			i, bug.bugContractName, bug.targetMethod.Name, bug.bugType, bug.bugPC, bug.bugTime)
 	}
 	return bugs
 }

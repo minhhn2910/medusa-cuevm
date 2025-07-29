@@ -29,7 +29,7 @@ const (
 	CHANCE_TO_SKIP_MUTATE                 = 50
 	CHANCE_TO_SMALL_DELTA                 = 5
 	VALUE_MUTATE_INT32                    = 7
-	VALUE_CHANCE_TO_STOP_INT_32           = 30
+	// VALUE_CHANCE_TO_STOP_INT_32           = 30
 
 	ELEMENT_ADDRESS_TYPE = 1
 	ELEMENT_VALUE_TYPE   = 2
@@ -119,10 +119,10 @@ func MutateValue(seed uint32, value *big.Int) uint32 {
 		// fmt.Println("CuEVM Debug: value word", i, "seed", seed)
 		seed = (a*seed + c) % m
 		randomChance = seed % 100
-		if randomChance <= VALUE_CHANCE_TO_STOP_INT_32 {
-			// fmt.Println("CuEVM Debug: stopping at seed", seed)
-			break
-		}
+		// if randomChance <= VALUE_CHANCE_TO_STOP_INT_32 {
+		// 	// fmt.Println("CuEVM Debug: stopping at seed", seed)
+		// 	break
+		// }
 	}
 
 	// Convert words to big.Int (little-endian: words[0] is least significant)

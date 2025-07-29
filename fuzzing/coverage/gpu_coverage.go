@@ -13,10 +13,10 @@ type GPUExecutionResult struct {
 	NewCoverageThreadIdx [][]uint32
 	NewCoverageIds       [][]uint32
 	// Bug information
-	NewBugThreadIdx [][]uint32
-	NewBugPCs       [][]uint32
-	NewBugTypes     [][]uint32
-
+	NewBugThreadIdx   [][]uint32
+	NewBugPCs         [][]uint32
+	NewBugTypes       [][]uint32
+	NewBugContractIds [][]uint32
 	// Storage information
 	NewStorageThreadIdx [][]uint32
 	NewStorageIds       [][]uint32

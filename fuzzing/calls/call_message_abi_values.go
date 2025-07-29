@@ -347,7 +347,7 @@ func (d *CallMessageDataAbiValues) PackWithMask() ([]byte, []DataMarker, error) 
 	}
 
 	// Adjust all marker offsets by 4 bytes for the method ID.
-	if d.Method.Sig != "CuEVM::fallback()" {
+	if d.Method.Sig != "CuEVM::fallback()" && d.Method.Sig != "CuEVM::fallback_payable()" {
 		for i := range markers {
 			markers[i].Offset += 4
 		}

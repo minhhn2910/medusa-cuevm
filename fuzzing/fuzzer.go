@@ -205,8 +205,9 @@ type Fuzzer struct {
 	// and only when debug logging is enabled.
 	lastPCsLogMsg time.Time
 
-	// contractAddressToCodeHash maps contract addresses to their runtime bytecode hashes for quick lookup
-	contractAddressToCodeHash map[common.Address]common.Hash
+	// contractCodeHashToName maps contract code hashes to their names for quick lookup
+	contractCodeHashToName map[common.Hash]string
+	contractIdToName       map[uint32]string
 	// CuEVM: CPU workers is fixed to number of threads
 	numCPUWorkers         int
 	sequencesPerCPUWorker int
@@ -328,16 +329,17 @@ func NewFuzzer(config config.ProjectConfig) (*Fuzzer, error) {
 
 	// Create and return our fuzzing instance.
 	fuzzer := &Fuzzer{
-		config:                    config,
-		senders:                   senders,
-		deployer:                  deployer,
-		baseValueSet:              valuegeneration.NewValueSet(),
-		contractDefinitions:       make(fuzzerTypes.Contracts, 0),
-		testCases:                 make([]TestCase, 0),
-		testCasesFinished:         make(map[string]TestCase),
-		contractAddressToCodeHash: make(map[common.Address]common.Hash),
-		addressIndexMap:           make(map[common.Address]uint8),
-		revertReporter:            revertReporter,
+		config:                 config,
+		senders:                senders,
+		deployer:               deployer,
+		baseValueSet:           valuegeneration.NewValueSet(),
+		contractDefinitions:    make(fuzzerTypes.Contracts, 0),
+		testCases:              make([]TestCase, 0),
+		testCasesFinished:      make(map[string]TestCase),
+		contractCodeHashToName: make(map[common.Hash]string),
+		contractIdToName:       make(map[uint32]string),
+		addressIndexMap:        make(map[common.Address]uint8),
+		revertReporter:         revertReporter,
 		Hooks: FuzzerHooks{
 			NewCallSequenceGeneratorConfigFunc: defaultCallSequenceGeneratorConfigFunc,
 			NewShrinkingValueMutatorFunc:       defaultShrinkingValueMutatorFunc,
@@ -493,8 +495,6 @@ func (f *Fuzzer) AddCompilationTargets(compilations []compilationTypes.Compilati
 		}
 		seedFromAST = true
 	}
-	fmt.Println("CuEVM Debug: seedFromAST", seedFromAST)
-	fmt.Println("CuEVM Debug: slitherResults", slitherResults)
 
 	// If we have results and there were no errors, we will seed the value set using the slither results
 	if !seedFromAST {
@@ -717,6 +717,25 @@ func chainSetupFromCompilations(fuzzer *Fuzzer, testChain *chain.TestChain) (*ex
 								generatedValues[i] = fuzzer.deployer
 								fmt.Println("CuEVM Debug: generatedValues", generatedValues[i], input.Type)
 							}
+							if input.Type.T == abi.UintTy {
+								lowerName := strings.ToLower(input.Name)
+								fmt.Printf("CuEVM Debug: generatedValues[%d] type: %T, value: %v, name: %s\n", i, generatedValues[i], generatedValues[i], input.Name)
+								if strings.Contains(lowerName, "supply") || strings.Contains(lowerName, "amount") {
+									switch v := generatedValues[i].(type) {
+									case *big.Int:
+										v.SetString("1000000000000000000000000", 10)
+										fmt.Println("CuEVM Debug: set *big.Int value for", input.Name)
+									}
+									fmt.Println("CuEVM Debug: generatedValues", generatedValues[i], input.Name)
+								} else if strings.Contains(lowerName, "decimal") {
+									switch v := generatedValues[i].(type) {
+									case *big.Int:
+										v.SetInt64(18)
+										fmt.Println("CuEVM Debug: set *big.Int value for decimals", input.Name)
+									}
+									fmt.Println("CuEVM Debug: generatedValues", generatedValues[i], input.Name)
+								}
+							}
 						}
 
 						// Encode all values to JSON format (this converts big.Int to string, etc.)
@@ -913,7 +932,7 @@ func defaultCallSequenceGeneratorConfigFunc(fuzzer *Fuzzer, valueSet *valuegener
 		RandomMutatedCorpusTailWeight:            40,
 		RandomMutatedSpliceAtRandomWeight:        20,
 		RandomMutatedInterleaveAtRandomWeight:    10,
-		FunctionRelationBias:                     0.9, // CuEVM: mutate based on function relations 0.8
+		FunctionRelationBias:                     0.8, // CuEVM: mutate based on function relations
 		ValueGenerator:                           mutationalGenerator,
 		ValueMutator:                             mutationalGenerator,
 	}
@@ -1557,6 +1576,7 @@ func (f *Fuzzer) runTransactionsGPU(workers []*FuzzerWorker, txBatchSize, sequen
 				NewCoverageIds:       make([][]uint32, numResults),
 				NewBugThreadIdx:      make([][]uint32, numResults),
 				NewBugPCs:            make([][]uint32, numResults),
+				NewBugContractIds:    make([][]uint32, numResults),
 				NewBugTypes:          make([][]uint32, numResults),
 				NewStorageThreadIdx:  make([][]uint32, numResults),
 				NewStorageIds:        make([][]uint32, numResults),
@@ -1576,6 +1596,7 @@ func (f *Fuzzer) runTransactionsGPU(workers []*FuzzerWorker, txBatchSize, sequen
 						fmt.Println("CuEVM Debug: GPU %d: new_coverage[%d]: %d", i, j, branchInfoSlice[j].branch_thread_idx)
 						branchInfo := branchInfoSlice[j]
 						gpuResult.NewCoverageThreadIdx[i] = append(gpuResult.NewCoverageThreadIdx[i], uint32(branchInfo.branch_thread_idx))
+						gpuResult.NewCoverageIds[i] = append(gpuResult.NewCoverageIds[i], uint32(branchInfo.branch_id))
 					}
 				}
 
@@ -1589,7 +1610,8 @@ func (f *Fuzzer) runTransactionsGPU(workers []*FuzzerWorker, txBatchSize, sequen
 							bugInfo := bugInfoSlice[j]
 							gpuResult.NewBugThreadIdx[i] = append(gpuResult.NewBugThreadIdx[i], uint32(bugInfo.bug_thread_idx))
 							gpuResult.NewBugPCs[i] = append(gpuResult.NewBugPCs[i], uint32(bugInfo.bug_id>>16))
-							gpuResult.NewBugTypes[i] = append(gpuResult.NewBugTypes[i], uint32(bugInfo.bug_id&0xFFFF))
+							gpuResult.NewBugTypes[i] = append(gpuResult.NewBugTypes[i], uint32((bugInfo.bug_id&0xFFFF)>>8))
+							gpuResult.NewBugContractIds[i] = append(gpuResult.NewBugContractIds[i], uint32(bugInfo.bug_id&0xFF))
 						}
 					}
 				}
@@ -1603,6 +1625,10 @@ func (f *Fuzzer) runTransactionsGPU(workers []*FuzzerWorker, txBatchSize, sequen
 						for j := 0; j < numNewStorage; j++ {
 							storageInfo := storageInfoSlice[j]
 							gpuResult.NewStorageThreadIdx[i] = append(gpuResult.NewStorageThreadIdx[i], uint32(storageInfo.storage_thread_idx))
+							gpuResult.NewStorageIds[i] = append(gpuResult.NewStorageIds[i], uint32(storageInfo.storage_id))
+							// for ease of use, just append everything to coverage idx. It will be added to corpus
+							gpuResult.NewCoverageThreadIdx[i] = append(gpuResult.NewCoverageThreadIdx[i], uint32(storageInfo.storage_thread_idx))
+							gpuResult.NewCoverageIds[i] = append(gpuResult.NewCoverageIds[i], uint32(storageInfo.storage_id))
 						}
 					}
 				}
@@ -1637,47 +1663,16 @@ func (f *Fuzzer) prepareAndProcessChainStateInGPU(testChain *chain.TestChain) er
 		return nil
 	}
 	fmt.Println("Go: Preparing and processing chain state data in GPU")
-	// Print all deployed contracts and their bytecode hashes
-	fmt.Println("===== DEPLOYED CONTRACTS AND THEIR BYTECODE HASHES =====")
-	worker := f.workers[0]
-	if worker != nil && worker.deployedContracts != nil {
-		fmt.Printf("Worker %d deployed contracts:\n", worker.workerIndex)
-		for addr, contract := range worker.deployedContracts {
-			// Check if we already have the hash in our map
-			if codeHash, exists := f.contractAddressToCodeHash[addr]; exists {
-				fmt.Printf("  Contract %s at %s - cached hash: %s\n",
-					contract.Name(), addr.Hex(), codeHash.Hex())
-				continue
-			}
-			f.BaseValueSet().AddAddress(addr)
+	fmt.Println("===== CONTRACTS NAME AND THEIR BYTECODE HASHES =====")
+	for _, contract := range f.contractDefinitions {
+		code := contract.CompiledContract().RuntimeBytecode
+		// Calculate the hash using similar logic to getContractCoverageMapHash
+		var codeHash common.Hash
 
-			// Get the bytecode from the chain state
-			code := contract.CompiledContract().RuntimeBytecode
-			// Calculate the hash using similar logic to getContractCoverageMapHash
-			var codeHash common.Hash
-
-			// For runtime bytecode, try to extract hash from metadata first
-			metadata := compilationTypes.ExtractContractMetadata(code)
-			if metadata != nil {
-				metadataHash := metadata.ExtractBytecodeHash()
-				if metadataHash != nil {
-					codeHash = common.BytesToHash(metadataHash)
-					// Save the hash to our map
-					f.contractAddressToCodeHash[addr] = codeHash
-					fmt.Printf("  Contract %s at %s - metadata hash: %s\n",
-						contract.Name(), addr.Hex(), codeHash.Hex())
-					continue
-				}
-			}
-			// Fall back to hashing the stripped bytecode
-			strippedCode := compilationTypes.RemoveContractMetadata(code)
-			codeHash = crypto.Keccak256Hash(strippedCode)
-			// Save the hash to our map
-			f.contractAddressToCodeHash[addr] = codeHash
-			fmt.Printf("  Contract %s at %s - bytecode hash: %s\n",
-				contract.Name(), addr.Hex(), codeHash.Hex())
-		}
-		fmt.Println()
+		codeHash = crypto.Keccak256Hash(code)
+		f.contractCodeHashToName[codeHash] = contract.Name()
+		fmt.Printf("  Contract %s - code hash: %s\n",
+			contract.Name(), codeHash.Hex())
 	}
 
 	fmt.Println("========================================================")
@@ -1710,9 +1705,11 @@ func (f *Fuzzer) prepareAndProcessChainStateInGPU(testChain *chain.TestChain) er
 	}
 
 	// Convert state dump to JSON format
-	stateJSON := convertStateToJSON(&stateDump, testChain.Head().Header, worker)
+	stateJSON := f.convertStateToJSON(&stateDump, testChain.Head().Header)
 	// CuEVM debug, to be deleted
 	// fmt.Println("CuEVM Debug: stateJSON", stateJSON)
+	// print contract state id to name map
+	// fmt.Println("CuEVM Debug: contractIdToName", f.contractIdToName)
 	// os.Exit(0)
 	// Call C function to process the JSON state
 	cJSON := C.CString(stateJSON)
@@ -1792,11 +1789,19 @@ func (f *Fuzzer) prepareAndProcessChainStateInGPU(testChain *chain.TestChain) er
 }
 
 // convertStateToJSON converts a state dump to JSON string compatible with CuEVM's expected format
-func convertStateToJSON(stateDump *ethstate.Dump, blockHeader *types.Header, worker *FuzzerWorker) string {
+func (f *Fuzzer) convertStateToJSON(stateDump *ethstate.Dump, blockHeader *types.Header) string {
 	// Create a map for the "pre" state format
 	preState := make(map[string]map[string]interface{})
+	// Extract and sort addresses for deterministic iteration order
+	addresses := make([]string, 0, len(stateDump.Accounts))
+	for addrStr := range stateDump.Accounts {
+		addresses = append(addresses, addrStr)
+	}
+	sort.Strings(addresses) // This ensures deterministic order
 
-	for addrStr, account := range stateDump.Accounts {
+	running_idx := 0
+	for _, addrStr := range addresses {
+		account := stateDump.Accounts[addrStr]
 		// Create account object
 		accountMap := make(map[string]interface{})
 
@@ -1804,13 +1809,32 @@ func convertStateToJSON(stateDump *ethstate.Dump, blockHeader *types.Header, wor
 		balanceBig := new(big.Int)
 		balanceBig.SetString(account.Balance, 10)
 		accountMap["balance"] = "0x" + balanceBig.Text(16)
-
+		if _, ok := f.shrinkWorker.deployedContracts[common.HexToAddress(addrStr)]; ok {
+			fmt.Println("CuEVM Debug: deployed contract", addrStr)
+			accountMap["balance"] = "0x0fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+		}
 		// Add nonce
 		accountMap["nonce"] = fmt.Sprintf("0x%x", account.Nonce)
 
 		// Add code if it exists
 		if len(account.Code) > 0 {
 			accountMap["code"] = "0x" + hex.EncodeToString(account.Code)
+			// get the code hash
+			codeHash := crypto.Keccak256Hash(account.Code)
+			contractName, ok := f.contractCodeHashToName[codeHash]
+			if ok {
+				// fmt.Println("CuEVM Debug: contractName", contractName)
+				accountMap["contractName"] = contractName
+				if len(addrStr) >= 4 { // Need at least "0x" + 2 hex chars
+					lastByteHex := addrStr[len(addrStr)-2:]
+					lastByteInt, _ := strconv.ParseInt(lastByteHex, 16, 32)
+					f.contractIdToName[uint32(lastByteInt)] = contractName
+				}
+
+			} else {
+				// fmt.Println("CuEVM Debug: contractName not found for code hash", codeHash.Hex())
+			}
+
 		} else {
 			accountMap["code"] = "0x"
 		}
@@ -1834,6 +1858,7 @@ func convertStateToJSON(stateDump *ethstate.Dump, blockHeader *types.Header, wor
 
 		// Add to pre state
 		preState[addrStr] = accountMap
+		running_idx++
 	}
 
 	// Create the final structure including env information
@@ -1907,7 +1932,7 @@ func (f *Fuzzer) launchGPUKernel() error {
 	// fmt.Println("CuEVM Debug: txBatchSize", txBatchSize)
 
 	if err == nil {
-		bigIntWeightValue := big.NewInt(max(10, int64((f.loopCounter+1)*f.sequencesPerCPUWorker*f.numCPUWorkers/10)))
+		bigIntWeightValue := big.NewInt(max(8, int64((f.loopCounter+1)*2)))
 		f.assertion_test_provider.GPUPostCallTest(f.workers, gpuResults, f.gpuMarkerOffsets, bigIntWeightValue)
 
 		// add all call sequences to corpus
@@ -1998,18 +2023,20 @@ func (f *Fuzzer) launchGPUKernel() error {
 
 					// fmt.Println("CuEVM Debug: Call element", fullSequence[i])
 				}
-				// fmt.Println("CuEVM Debug: GPU adding sequence to corpus bigIntWeightValue", bigIntWeightValue)
+
+				fmt.Println("CuEVM Debug: GPU adding sequence to corpus bigIntWeightValue, branch id", bigIntWeightValue, gpuResults.NewCoverageIds[batchIdx][idx])
 				// fmt.Println("CuEVM Debug: fullSequence", fullSequence)
-				// Send sequence to shrink worker for execution and corpus addition
+				// Send sequence to shrink worker for execution and corpus addition with coverage ID
 				select {
 				case f.shrinkWorker.addSequenceCorpusChan <- AddSequenceCorpusRequest{
-					Sequence: fullSequence,
-					Weight:   bigIntWeightValue,
+					Sequence:   fullSequence,
+					Weight:     bigIntWeightValue,
+					CoverageId: &gpuResults.NewCoverageIds[batchIdx][idx],
 				}:
 					// Successfully enqueued
 				default:
 					fmt.Println("addSequenceCorpusChan full, adding sequence directly to corpus")
-					err = f.corpus.AddCallSequence(fullSequence, bigIntWeightValue)
+					err = f.corpus.AddCallSequenceWithCoverageId(fullSequence, bigIntWeightValue, gpuResults.NewCoverageIds[batchIdx][idx])
 				}
 				if err != nil {
 					return err

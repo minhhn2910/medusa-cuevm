@@ -232,8 +232,12 @@ func (fw *FuzzerWorker) addCallSequenceCorpusLoop() {
 			fmt.Println("Failed to execute sequence:", err)
 		}
 
-		// Add to corpus after execution
-		err = fw.fuzzer.corpus.AddCallSequence(req.Sequence, req.Weight)
+		// Add to corpus after execution with optional coverage ID
+		if req.CoverageId != nil {
+			err = fw.fuzzer.corpus.AddCallSequenceWithCoverageId(req.Sequence, req.Weight, *req.CoverageId)
+		} else {
+			err = fw.fuzzer.corpus.AddCallSequence(req.Sequence, req.Weight)
+		}
 		if err != nil {
 			fmt.Println("Failed to add sequence to corpus:", err)
 		}
