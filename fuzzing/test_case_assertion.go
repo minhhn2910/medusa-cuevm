@@ -15,11 +15,18 @@ import (
 )
 
 const (
+	// 	#define BUG_INTEGER_BUG 0x01
+	// #define BUG_SELF_DESTRUCT 0x02
+	// #define BUG_LEAKING_ETHER 0x03
+	// #define BUG_ARBITRARY_CALL 0x04
+	// #define BUG_REENTRANCY 0x05
+	// #define BUG_INVALID_OPCODE 0xFF
 	CuEVM_ASSERTION_BUG_TYPE = 0xFF
-	CuEVM_INTEGER_OVERFLOW   = 0x01
-	CuEVM_INTEGER_UNDERFLOW  = 0x02
-	CuEVM_SELF_DESTRUCT      = 0x03
-	CuEVM_LEAKING_ETHER      = 0x04
+	CuEVM_INTEGER_BUG        = 0x01
+	CuEVM_SELF_DESTRUCT      = 0x02
+	CuEVM_LEAKING_ETHER      = 0x03
+	CuEVM_ARBITRARY_CALL     = 0x04
+	CuEVM_REENTRANCY         = 0x05
 )
 
 // bugTypeName returns a human-readable name for the bug type
@@ -27,14 +34,16 @@ func bugTypeName(bugType uint32) string {
 	switch bugType {
 	case CuEVM_ASSERTION_BUG_TYPE:
 		return "Assertion Failure"
-	case CuEVM_INTEGER_OVERFLOW:
+	case CuEVM_INTEGER_BUG:
 		return "Integer Overflow"
-	case CuEVM_INTEGER_UNDERFLOW:
-		return "Integer Underflow"
 	case CuEVM_SELF_DESTRUCT:
 		return "Self Destruct"
 	case CuEVM_LEAKING_ETHER:
 		return "Leaking Ether"
+	case CuEVM_ARBITRARY_CALL:
+		return "Arbitrary Call"
+	case CuEVM_REENTRANCY:
+		return "Reentrancy"
 	default:
 		return "Assertion Failure"
 	}

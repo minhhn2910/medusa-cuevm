@@ -299,19 +299,21 @@ func (t *AssertionTestCaseProvider) GPUPostCallTest(workers []*FuzzerWorker, gpu
 					NumInstancesPerDevice:  t.fuzzer.numInstancesPerDevice,
 					AddressConstants:       t.fuzzer.addressConstants,
 					IntegerConstants:       t.fuzzer.integerConstants,
-					BlockNumberDelayMax:    60480, // hardcode for now
-					BlockTimestampDelayMax: 604800,
+					BlockNumberDelayMax:    60480 * 2, // hardcode for now
+					BlockTimestampDelayMax: 604800 * 4,
 					SenderCount:            uint32(len(t.fuzzer.senders)),
+					IsSpecialSender:        fullSequence[i].Call.From == t.fuzzer.specialSenderAddr,
+					SpecialSenderIdx:       t.fuzzer.specialSenderIdx,
 				})
 				// fmt.Println("CuEVM Debug: mutatedData", hex.EncodeToString(mutatedData))
 
 				// Apply mutated block values if they were changed (non-zero)
-
-				if mutatedBlockNumber >= 0 {
-					fullSequence[i].BlockNumberDelay = uint64(mutatedBlockNumber)
-				}
-				if mutatedBlockTimestamp >= 0 {
-					fullSequence[i].BlockTimestampDelay = uint64(mutatedBlockTimestamp)
+				if i == 0 {
+					fullSequence[i].BlockNumberDelay = max(1, workers[workerIdx].callSequenceElements[sequenceIdx][0].BlockNumberDelay) + uint64(max(1, int64(mutatedBlockNumber))) - 1          // first block is 1
+					fullSequence[i].BlockTimestampDelay = max(1, workers[workerIdx].callSequenceElements[sequenceIdx][0].BlockTimestampDelay) + uint64(max(1, int64(mutatedBlockTimestamp))) - 1 // first block is 1
+				} else {
+					fullSequence[i].BlockNumberDelay = uint64(max(1, int64(mutatedBlockNumber)))
+					fullSequence[i].BlockTimestampDelay = uint64(max(1, int64(mutatedBlockTimestamp)))
 				}
 
 				if mutatedSenderIndex >= 0 {

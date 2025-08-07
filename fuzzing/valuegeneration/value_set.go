@@ -30,9 +30,9 @@ type ValueSet struct {
 
 	// array for GPU data generation & mutator
 	addressesArray []common.Address
-	integersArray []*big.Int
-	stringsArray []string
-	bytesArray [][]byte
+	integersArray  []*big.Int
+	stringsArray   []string
+	bytesArray     [][]byte
 }
 
 // NewValueSet initializes a new ValueSet object for use with a Fuzzer.
@@ -50,17 +50,22 @@ func NewValueSet() *ValueSet {
 // Clone creates a copy of the current ValueSet.
 func (vs *ValueSet) Clone() *ValueSet {
 	baseValueSet := &ValueSet{
-		addresses:    maps.Clone(vs.addresses),
-		integers:     maps.Clone(vs.integers),
-		strings:      maps.Clone(vs.strings),
-		bytes:        maps.Clone(vs.bytes),
-		hashProvider: sha3.NewLegacyKeccak256(),
+		addresses:      maps.Clone(vs.addresses),
+		integers:       maps.Clone(vs.integers),
+		strings:        maps.Clone(vs.strings),
+		bytes:          maps.Clone(vs.bytes),
+		addressesArray: vs.addressesArray,
+		integersArray:  vs.integersArray,
+		stringsArray:   vs.stringsArray,
+		bytesArray:     vs.bytesArray,
+		hashProvider:   sha3.NewLegacyKeccak256(),
 	}
 	return baseValueSet
 }
+
 // Sync valueset to array, for GPU data generation & mutator
 // Only called at the beginning of setting up the GPU state
-func (vs *ValueSet) SyncArrays(){
+func (vs *ValueSet) SyncArrays() {
 	ints := maps.Values(vs.integers)
 	slices.SortFunc(ints, func(a, b *big.Int) int {
 		return a.Cmp(b)
@@ -84,6 +89,7 @@ func (vs *ValueSet) SyncArrays(){
 	vs.stringsArray = strs
 
 }
+
 // Addresses returns a list of addresses contained within the set.
 func (vs *ValueSet) Addresses() []common.Address {
 	// res := make([]common.Address, len(vs.addresses))
