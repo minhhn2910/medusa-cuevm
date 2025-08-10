@@ -162,7 +162,7 @@ func (d *CallMessageDataAbiValues) PackWithMask() ([]byte, []DataMarker, error) 
 
 	// add special marker for Value muation
 	if d.Method.IsPayable() {
-		markers = append(markers, DataMarker{Offset: 0, Type: DataTypeValue, Length: 32})
+		markers = append(markers, DataMarker{Offset: 0, Type: DataTypeValue, Length: 0})
 	}
 	// --- Pass 1: Pack arguments and build argData ---
 
@@ -207,7 +207,6 @@ func (d *CallMessageDataAbiValues) PackWithMask() ([]byte, []DataMarker, error) 
 		}
 	}
 	argData := append(head, tail...)
-
 	// --- Pass 2: Generate markers using the final argData ---
 
 	// Helper function to safely clear markers when invalid data is detected
@@ -301,7 +300,7 @@ func (d *CallMessageDataAbiValues) PackWithMask() ([]byte, []DataMarker, error) 
 						clearMarkers()
 						return false
 					}
-					if !walkAndMark(*typ.Elem, offset+dynamicElemOffset) {
+					if !walkAndMark(*typ.Elem, elemDataStart+dynamicElemOffset) {
 						return false
 					}
 				} else {
@@ -345,6 +344,7 @@ func (d *CallMessageDataAbiValues) PackWithMask() ([]byte, []DataMarker, error) 
 			headReadOffset += getTypeSize(arg.Type)
 		}
 	}
+	// fmt.Println("CuEVM Debug: markers", markers)
 
 	// Adjust all marker offsets by 4 bytes for the method ID.
 	if d.Method.Sig != "CuEVM::fallback()" && d.Method.Sig != "CuEVM::fallback_payable()" {

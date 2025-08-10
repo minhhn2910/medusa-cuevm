@@ -141,6 +141,8 @@ func (s *SlitherConfig) RunSlither(target string) (*SlitherResults, error) {
 		// Run slither
 		start := time.Now()
 		out, err = cmd.CombinedOutput()
+		fmt.Printf("CuEVM Debug: out: %s\n", out)
+		fmt.Printf("CuEVM Debug: err: %s\n", err)
 		if err != nil {
 			return nil, err
 		}

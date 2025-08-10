@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/crytic/medusa-geth/common"
 	"github.com/crytic/medusa/compilation/abiutils"
 	"github.com/crytic/medusa/fuzzing/calls"
 	"github.com/crytic/medusa/fuzzing/config"
@@ -302,8 +303,8 @@ func (t *AssertionTestCaseProvider) GPUPostCallTest(workers []*FuzzerWorker, gpu
 					BlockNumberDelayMax:    60480 * 2, // hardcode for now
 					BlockTimestampDelayMax: 604800 * 4,
 					SenderCount:            uint32(len(t.fuzzer.senders)),
-					IsSpecialSender:        fullSequence[i].Call.From == t.fuzzer.specialSenderAddr,
-					SpecialSenderIdx:       t.fuzzer.specialSenderIdx,
+					IsReentrancySender:     fullSequence[i].Call.From == common.HexToAddress(REENTRANCY_ATTACKER_ADDRESS),
+					IsRandomSender:         fullSequence[i].Call.From == common.HexToAddress(RANDOM_ATTACKER_ADDRESS),
 				})
 				// fmt.Println("CuEVM Debug: mutatedData", hex.EncodeToString(mutatedData))
 

@@ -17,8 +17,8 @@ type FuzzerConfig struct {
 	BlockNumberDelayMax    uint32
 	BlockTimestampDelayMax uint32
 	SenderCount            uint32
-	IsSpecialSender        bool
-	SpecialSenderIdx       int32
+	IsReentrancySender     bool
+	IsRandomSender         bool
 }
 
 const (
@@ -365,6 +365,14 @@ func RestoreMutation(data []byte, dataMarkers []calls.DataMarker, sequenceIdx, e
 	// fmt.Println("CuEVM Debug: mutated block timestamp", mutatedBlockTimestamp)
 	// fmt.Println("CuEVM Debug: seed", seed)
 	// fmt.Println("CuEVM Debug: dataMarkers", dataMarkers)
+	var isRandomSender, isReentrancySender bool
+	if mutatedSenderIndex == -1 {
+		isRandomSender = fuzzerConfig.IsRandomSender
+		isReentrancySender = fuzzerConfig.IsReentrancySender
+	} else {
+		isRandomSender = int32(mutatedSenderIndex) == int32(fuzzerConfig.SenderCount-1)
+		isReentrancySender = int32(mutatedSenderIndex) == int32(fuzzerConfig.SenderCount-2)
+	}
 
 	for _, marker := range dataMarkers {
 		elementOffset := int(marker.Offset)
@@ -372,7 +380,7 @@ func RestoreMutation(data []byte, dataMarkers []calls.DataMarker, sequenceIdx, e
 		elementLength := uint32(marker.Length)
 
 		// Handle value mutation
-		if elementType == ELEMENT_VALUE_TYPE {
+		if elementType == ELEMENT_VALUE_TYPE && !isRandomSender {
 			seed = MutateValue(seed, mutatedValue)
 			// fmt.Println("CuEVM Debug: mutated value, seed", seed)
 			continue
@@ -398,20 +406,13 @@ func RestoreMutation(data []byte, dataMarkers []calls.DataMarker, sequenceIdx, e
 			seed = AFLMutateByteArray(slice, elementLength, uint32(elementType), seed, fuzzerConfig.IntegerConstants)
 
 		} else if elementType == ELEMENT_ADDRESS_TYPE { // address
-			// if randRange(&seed, 100) < CHANCE_TO_CREATE_NEW_ADDRESS {
-			// 	// printf("thread %d create new address\n", INSTANCE_GLOBAL_IDX);
-			// 	ctx := &MutationContext{
-			// 		Data:   slice[12:32], // Target actual address bytes (offset + 12)
-			// 		Length: 20,
-			// 		Seed:   &seed,
-			// 	}
-			// 	mutateRandomBytes(ctx)
-			// 	seed = *ctx.Seed
-			// } else {
+
 			if len(fuzzerConfig.AddressConstants) > 0 {
-				upper_bound := uint32(len(fuzzerConfig.AddressConstants)) - 1
-				if (mutatedSenderIndex == fuzzerConfig.SpecialSenderIdx) || (mutatedSenderIndex == -1 && fuzzerConfig.IsSpecialSender) {
+				upper_bound := uint32(len(fuzzerConfig.AddressConstants)) - 2
+				if isReentrancySender {
 					upper_bound += 1
+				} else if isRandomSender {
+					upper_bound += 2
 				}
 				randomIndex := randRange(&seed, upper_bound)
 				addressConstant := fuzzerConfig.AddressConstants[randomIndex]

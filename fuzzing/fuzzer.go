@@ -248,8 +248,8 @@ type Fuzzer struct {
 	integerConstants []string // hex string
 
 	deployedContractAddr map[string]common.Address
-	specialSenderIdx     int32
-	specialSenderAddr    common.Address
+
+	specialSenderAddr []common.Address // if an adress is in the map, it is a special sender
 
 	// Pre-allocated arrays for GPU processing to avoid repeated allocations
 	gpuDataOffsets   []uint32
@@ -491,7 +491,7 @@ func (f *Fuzzer) AddCompilationTargets(compilations []compilationTypes.Compilati
 	// No need to handle the error here since having compilation artifacts implies that we used a supported
 	// platform configuration
 	platformConfig, _ := f.config.Compilation.GetPlatformConfig()
-
+	fmt.Printf("CuEVM Debug: platformConfig: %s\n", platformConfig)
 	// Retrieve the compilation target for slither
 	target := platformConfig.GetTarget()
 
@@ -536,21 +536,22 @@ func (f *Fuzzer) AddCompilationTargets(compilations []compilationTypes.Compilati
 			}
 		}
 	}
-	// CuEVM add attacker addresses to sender list
-	f.senders = append(f.senders, common.HexToAddress(REENTRANCY_ATTACKER_ADDRESS))
-	f.senders = append(f.senders, common.HexToAddress(RANDOM_ATTACKER_ADDRESS))
-	// f.senders = append(f.senders, common.HexToAddress(RANDOM_ATTACKER_ADDRESS))
-	f.senders = append(f.senders, f.deployer)
-	for _, sender := range f.senders {
-		if sender != common.HexToAddress(RANDOM_ATTACKER_ADDRESS) {
-			f.baseValueSet.AddAddress(sender)
-		}
-	}
-
 	// sort senders for deterministic mutation
 	sort.Slice(f.senders, func(i, j int) bool {
 		return f.senders[i].Hex() < f.senders[j].Hex()
 	})
+	f.senders = append(f.senders, f.deployer)
+	// CuEVM add attacker addresses to sender list
+
+	f.senders = append(f.senders, common.HexToAddress(REENTRANCY_ATTACKER_ADDRESS))
+	f.senders = append(f.senders, common.HexToAddress(RANDOM_ATTACKER_ADDRESS))
+
+	for _, sender := range f.senders {
+		// Dont add attacker addresses to base value set
+		if sender != common.HexToAddress(RANDOM_ATTACKER_ADDRESS) && sender != common.HexToAddress(REENTRANCY_ATTACKER_ADDRESS) {
+			f.baseValueSet.AddAddress(sender)
+		}
+	}
 
 	// Capture all the contract definitions, functions, and cache the source code
 	for i := 0; i < len(compilations); i++ {
@@ -956,11 +957,11 @@ func chainSetupFromCompilations(fuzzer *Fuzzer, testChain *chain.TestChain) (*ex
 func getDefaultRandomValueGeneratorConfig() *valuegeneration.RandomValueGeneratorConfig {
 	return &valuegeneration.RandomValueGeneratorConfig{
 		GenerateRandomArrayMinSize:  0,
-		GenerateRandomArrayMaxSize:  8, // CuEVM debug
+		GenerateRandomArrayMaxSize:  6, // CuEVM debug
 		GenerateRandomBytesMinSize:  0,
-		GenerateRandomBytesMaxSize:  64,
+		GenerateRandomBytesMaxSize:  68,
 		GenerateRandomStringMinSize: 0,
-		GenerateRandomStringMaxSize: 64,
+		GenerateRandomStringMaxSize: 68,
 	}
 }
 
@@ -1795,21 +1796,20 @@ func (f *Fuzzer) prepareAndProcessChainStateInGPU(testChain *chain.TestChain) er
 	}
 
 	sendersList := make([]string, len(f.senders))
-	f.specialSenderIdx = 0
+	specialSenderAddr := make([]common.Address, 0)
 	for i, addr := range f.senders {
 		sendersList[i] = addr.Hex()
-		if addr == common.HexToAddress(RANDOM_ATTACKER_ADDRESS) {
-			f.specialSenderIdx = int32(i)
-			f.specialSenderAddr = addr
+		if addr == common.HexToAddress(RANDOM_ATTACKER_ADDRESS) || addr == common.HexToAddress(REENTRANCY_ATTACKER_ADDRESS) {
+			specialSenderAddr = append(specialSenderAddr, addr)
 		}
 	}
 	for _, sender := range sendersList {
 		fmt.Println("CuEVM Debug: sender", sender)
 	}
+	fmt.Println("CuEVM Debug: specialSenderAddr", specialSenderAddr)
 	// groupConstantsByTypeHex groups slither constants by type and converts values to hex strings as required.
 	groupedConstants := groupConstantsByTypeHex(addressSet, integerSet)
 	groupedConstants["sender"] = sendersList
-	groupedConstants["specialSenderIdx"] = []string{strconv.Itoa(int(f.specialSenderIdx))}
 	constantsBytes, err := json.Marshal(groupedConstants)
 	var constantJSON *C.char
 	if err != nil {
@@ -1819,13 +1819,15 @@ func (f *Fuzzer) prepareAndProcessChainStateInGPU(testChain *chain.TestChain) er
 	}
 	f.addressConstants = groupedConstants["address"]
 	f.integerConstants = groupedConstants["integer"]
-	f.addressConstants = append(f.addressConstants, f.specialSenderAddr.Hex())
+	// add special sender addresses to address constants
+	f.addressConstants = append(f.addressConstants, common.HexToAddress(REENTRANCY_ATTACKER_ADDRESS).Hex())
+	f.addressConstants = append(f.addressConstants, common.HexToAddress(RANDOM_ATTACKER_ADDRESS).Hex())
 	// create address index map
 	for i, addr := range f.senders {
 		f.sendersIndexMap[addr] = uint8(i)
 	}
 	fmt.Println("CuEVM Debug: sendersIndexMap", f.sendersIndexMap)
-
+	fmt.Println("Address constants", f.addressConstants)
 	// fmt.Println("\n\nCuEVM Debug: constantJSON", string(constantsBytes))
 	// fmt.Println("\n\n")
 
@@ -2034,7 +2036,7 @@ func (f *Fuzzer) launchGPUKernel() error {
 						// fmt.Println("CuEVM Debug: markerOffsets[markerOffsetIdx] (sequenceIdx/f.skipSequenceSize)*f.skipSequenceSize", markerOffsets[markerOffsetIdx], "sequenceIdx", sequenceIdx, "i", i)
 						dataMarkers = f.workers[workerIdx].callSequenceElements[sequenceIdx][i].Call.DataMarkers
 					}
-					// fmt.Println("CuEVM Debug: dataMarkers", dataMarkers)
+					// fmt.Println("CuEVM Debug: dataMarkers, signature", dataMarkers, methodSig)
 					// dataMarkers := f.workers[workerIdx].callSequenceElements[(sequenceIdx/f.skipSequenceSize)*f.skipSequenceSize][i].Call.DataMarkers
 					// fmt.Println("CuEVM Debug: fullSequence[i].Call.Data", hex.EncodeToString(fullSequence[i].Call.Data))
 					// mutatedData, mutatedBlockNumber, mutatedBlockTimestamp, mutatedValue := f.restore_mutation(fullSequence[i].Call.Data, dataMarkers, int(gpuResults.NewCoverageIndices[batchIdx][idx]), i)
@@ -2050,8 +2052,8 @@ func (f *Fuzzer) launchGPUKernel() error {
 								BlockNumberDelayMax:    60480 * 2, // hardcode for now
 								BlockTimestampDelayMax: 604800 * 4,
 								SenderCount:            uint32(len(f.senders)),
-								IsSpecialSender:        fullSequence[i].Call.From == f.specialSenderAddr,
-								SpecialSenderIdx:       f.specialSenderIdx,
+								IsReentrancySender:     fullSequence[i].Call.From == common.HexToAddress(REENTRANCY_ATTACKER_ADDRESS),
+								IsRandomSender:         fullSequence[i].Call.From == common.HexToAddress(RANDOM_ATTACKER_ADDRESS),
 							})
 
 					// Apply mutated block values if they were changed (non-zero)
