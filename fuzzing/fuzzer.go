@@ -1179,9 +1179,9 @@ func (f *Fuzzer) spawnWorkersLoop(baseTestChain *chain.TestChain) error {
 
 		f.loopCounter++
 
-		// if f.loopCounter == 1 {
-		// 	working = false
-		// }
+		if f.loopCounter == 3 {
+			working = false
+		}
 		// CuEVM Debug
 		fmt.Printf("\n Medusa loop counter: %d\n", f.loopCounter)
 		f.callsTested = f.loopCounter * f.sequencesPerCPUWorker * f.numCPUWorkers * f.config.Fuzzing.CallSequenceLength * f.skipSequenceSize
@@ -2005,7 +2005,7 @@ func (f *Fuzzer) launchGPUKernel() error {
 	// fmt.Println("CuEVM Debug: txBatchSize", txBatchSize)
 
 	if err == nil {
-		bigIntWeightValue := big.NewInt(max(8, int64((f.loopCounter+1)*2)))
+		bigIntWeightValue := big.NewInt(max(3, int64((f.loopCounter + 1))))
 		f.assertion_test_provider.GPUPostCallTest(f.workers, gpuResults, f.gpuMarkerOffsets, bigIntWeightValue)
 
 		// add all call sequences to corpus

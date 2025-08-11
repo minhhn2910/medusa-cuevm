@@ -17,6 +17,8 @@ type WeightedRandomChoice[T any] struct {
 	// Its probability is calculated as current weight / all weights in a WeightedRandomChooser.
 	weight *big.Int
 
+	// hitCount describes the number of times this WeightedRandomChoice has been selected.
+	hitCount uint64
 	uniqueId uint32
 }
 
@@ -47,6 +49,8 @@ type WeightedRandomChooser[T any] struct {
 	// totalWeight describes the sum of all weights in choices. This is stored here so it does not need to be
 	// recomputed.
 	totalWeight *big.Int
+
+	averageExecutionTime float64
 
 	// randomProvider offers a source of random data.
 	randomProvider *rand.Rand
@@ -108,16 +112,37 @@ func (c *WeightedRandomChooser[T]) RemoveChoiceByUniqueId(uniqueId uint32) bool 
 // AddChoices adds weighted choices to the WeightedRandomChooser, allowing for future random selection.
 func (c *WeightedRandomChooser[T]) AddChoices(choices ...*WeightedRandomChoice[T]) {
 	// Acquire our lock during the duration of this method.
+	// c.randomProviderLock.Lock()
+	// defer c.randomProviderLock.Unlock()
+
+	// Loop for each choice to add to sum all weights
+	// for _, choice := range choices {
+	// 	c.totalWeight = new(big.Int).Add(c.totalWeight, choice.weight)
+	// }
+
+	// // Add to choices to our array
+	// c.choices = append(c.choices, choices...)
+	for _, choice := range choices {
+		// fmt.Println("Adding choice: ", choice.Data)
+		c.AddChoice(choice)
+	}
+}
+
+func (c *WeightedRandomChooser[T]) AddChoice(choice *WeightedRandomChoice[T]) {
+	// Acquire our lock during the duration of this method.
 	c.randomProviderLock.Lock()
 	defer c.randomProviderLock.Unlock()
 
 	// Loop for each choice to add to sum all weights
-	for _, choice := range choices {
-		c.totalWeight = new(big.Int).Add(c.totalWeight, choice.weight)
-	}
+	c.totalWeight = new(big.Int).Add(c.totalWeight, choice.weight)
+
+	// weight := INITIAL_WEIGHT // new choice never fuzzed
+	// // Ityfuzz  weight ~ 3
+
+	// choice.hitCount = 0
 
 	// Add to choices to our array
-	c.choices = append(c.choices, choices...)
+	c.choices = append(c.choices, choice)
 }
 
 // Choose selects a random weighted item from the WeightedRandomChooser, or returns an error if one occurs.
