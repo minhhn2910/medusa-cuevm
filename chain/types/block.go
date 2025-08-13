@@ -32,9 +32,17 @@ type Block struct {
 
 // NewBlock returns a new Block with the provided parameters.
 func NewBlock(header *types.Header) *Block {
+	var customHash common.Hash
+	blockNum := uint32(header.Number.Uint64())
+	// Store block number in the last 8 bytes (big-endian)
+
+	customHash[28] = byte(blockNum >> 24)
+	customHash[29] = byte(blockNum >> 16)
+	customHash[30] = byte(blockNum >> 8)
+	customHash[31] = byte(blockNum)
 	// Create our block and return it
 	block := &Block{
-		Hash:           header.Hash(),
+		Hash:           customHash, // use custom blockhash to compatible with CuEVM // header.Hash(),
 		Header:         header,
 		Messages:       make([]*core.Message, 0),
 		MessageResults: make([]*MessageResults, 0),

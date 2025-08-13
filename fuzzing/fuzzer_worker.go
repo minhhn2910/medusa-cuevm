@@ -444,7 +444,7 @@ func (fw *FuzzerWorker) testNextCallSequence() ([]ShrinkCallSequenceRequest, err
 
 	// Initialize a new sequence within our sequence generator.
 	var isNewSequence bool
-	isNewSequence, err = fw.sequenceGenerator.InitializeNextSequence()
+	isNewSequence, err = fw.sequenceGenerator.InitializeNextSequence(fw.fuzzer.loopCounter)
 	if err != nil {
 		return nil, err
 	}

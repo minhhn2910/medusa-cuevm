@@ -203,7 +203,7 @@ func NewCallSequenceGenerator(worker *FuzzerWorker, config *CallSequenceGenerato
 // obtained by calling PopSequenceElement iteratively.
 // Returns a boolean indicating whether the initialized sequence is a newly generated sequence (rather than an
 // unmodified one loaded from the corpus), or an error if one occurred.
-func (g *CallSequenceGenerator) InitializeNextSequence() (bool, error) {
+func (g *CallSequenceGenerator) InitializeNextSequence(fuzzing_loop_counter int) (bool, error) {
 	// fmt.Println("\n\nCuEVM Debug: InitializeNextSequence\n\n")
 	g.generateFromTail = false
 	// Reset the state of our generator.
@@ -225,7 +225,7 @@ func (g *CallSequenceGenerator) InitializeNextSequence() (bool, error) {
 
 	// If this provider has no corpus mutation methods or corpus call sequences, we return a call sequence with
 	// nil elements to signal that we want an entirely new sequence.
-	if g.mutationStrategyChooser.ChoiceCount() == 0 || g.worker.fuzzer.corpus.ActiveMutableSequenceCount() == 0 {
+	if g.mutationStrategyChooser.ChoiceCount() == 0 || g.worker.fuzzer.corpus.ActiveMutableSequenceCount() == 0 || fuzzing_loop_counter < 3 {
 		// fmt.Println("CuEVM Debug: no corpus mutation methods or corpus call sequences")
 		return true, nil
 	}
@@ -617,6 +617,63 @@ func (g *CallSequenceGenerator) PopSequenceElement() (*calls.CallSequenceElement
 	// fmt.Println("CuEVM Debug: PopSequenceElement - element", element)
 	g.fetchIndex++
 	return element, nil
+}
+
+// generateNewElement generates a new call sequence element which targets a method in a contract
+// deployed to the CallSequenceGenerator's parent FuzzerWorker chain, with fuzzed call data.
+// Returns the call sequence element, or an error if one was encountered.
+func (g *CallSequenceGenerator) generateNewElementWithChosenMethod(selectedMethod *contracts.DeployedContractMethod, forceValue bool) (*calls.CallSequenceElement, error) {
+	// Seed a fixed sender
+	selectedSender := g.worker.fuzzer.senders[0]
+	// Generate fuzzed parameters for the function call
+	args := make([]any, len(selectedMethod.Method.Inputs))
+	for i := 0; i < len(args); i++ {
+		// Create our fuzzed parameters.
+		input := selectedMethod.Method.Inputs[i]
+		args[i] = valuegeneration.GenerateAbiValue(g.config.ValueGenerator, &input.Type)
+	}
+
+	// If this is a payable function, generate value to send
+	var value *big.Int
+	value = big.NewInt(0)
+	if selectedMethod.Method.StateMutability == "payable" || forceValue {
+		value = g.config.ValueGenerator.GenerateInteger(false, 64)
+	}
+
+	// Create our message using the provided parameters.
+	// We fill out some fields and populate the rest from our TestChain properties.
+	// TODO: We likely want to make gasPrice fluctuate within some sensible range here.
+	msg := calls.NewCallMessageWithAbiValueData(selectedSender, &selectedMethod.Address, 0, value, g.worker.fuzzer.config.Fuzzing.TransactionGasLimit, nil, nil, nil, &calls.CallMessageDataAbiValues{
+		Method:      &selectedMethod.Method,
+		InputValues: args,
+	})
+
+	if g.worker.fuzzer.config.Fuzzing.TestChainConfig.SkipAccountChecks {
+		msg.SkipAccountChecks = true
+	}
+
+	// Determine our delay values for this element
+	blockNumberDelay := uint64(0)
+	blockTimestampDelay := uint64(0)
+	if g.worker.fuzzer.config.Fuzzing.MaxBlockNumberDelay > 0 {
+		blockNumberDelay = g.config.ValueGenerator.GenerateInteger(false, 64).Uint64() % (g.worker.fuzzer.config.Fuzzing.MaxBlockNumberDelay + 1)
+	}
+	if g.worker.fuzzer.config.Fuzzing.MaxBlockTimestampDelay > 0 {
+		blockTimestampDelay = g.config.ValueGenerator.GenerateInteger(false, 64).Uint64() % (g.worker.fuzzer.config.Fuzzing.MaxBlockTimestampDelay + 1)
+	}
+
+	// For each block we jump, we need a unique time stamp for chain semantics, so if our block number jump is too small,
+	// while our timestamp jump is larger, we cap it.
+	if blockNumberDelay > blockTimestampDelay {
+		if blockTimestampDelay == 0 {
+			blockNumberDelay = 0
+		} else {
+			blockNumberDelay %= blockTimestampDelay
+		}
+	}
+
+	// Return our call sequence element.
+	return calls.NewCallSequenceElement(selectedMethod.Contract, msg, blockNumberDelay, blockTimestampDelay), nil
 }
 
 // generateNewElement generates a new call sequence element which targets a method in a contract

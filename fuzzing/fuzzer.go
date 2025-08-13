@@ -630,6 +630,16 @@ func (f *Fuzzer) createTestChain(additionalGenesisAlloc *types.GenesisAlloc) (*c
 		genesisAlloc[sender] = new_acc
 	}
 
+	// Calculate the address of the first deployed contract by the deployer
+	contractAddr := crypto.CreateAddress(f.deployer, 0)
+	_, ok := genesisAlloc[contractAddr]
+	if !ok {
+		genesisAlloc[contractAddr] = types.Account{
+			Balance: big.NewInt(0),
+		}
+	}
+	genesisAlloc[contractAddr].Balance.SetString("0fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", 16)
+
 	// temporarily hardcode the path to the attacker code
 	executablePath, err := os.Executable()
 	if err != nil {
@@ -1145,6 +1155,7 @@ func (f *Fuzzer) spawnWorkersLoop(baseTestChain *chain.TestChain) error {
 	// 	fmt.Println("CuEVM Debug: staticABIMarkerIndexMap", f.staticABIMarkerIndexMap[f.staticABISignature[i]])
 	// }
 
+	f.seedCorpus()
 	// TODO: clone to other workers
 	// Main processing loop
 	working := true
@@ -1179,9 +1190,9 @@ func (f *Fuzzer) spawnWorkersLoop(baseTestChain *chain.TestChain) error {
 
 		f.loopCounter++
 
-		if f.loopCounter == 3 {
-			working = false
-		}
+		// if f.loopCounter == 3 {
+		// 	working = false
+		// }
 		// CuEVM Debug
 		fmt.Printf("\n Medusa loop counter: %d\n", f.loopCounter)
 		f.callsTested = f.loopCounter * f.sequencesPerCPUWorker * f.numCPUWorkers * f.config.Fuzzing.CallSequenceLength * f.skipSequenceSize
@@ -1208,6 +1219,75 @@ func (f *Fuzzer) PrepareNonce(baseTestChain *chain.TestChain) {
 		f.originalNonceMap[common.HexToAddress(address)] = baseTestChain.State().GetNonce(common.HexToAddress(address))
 	}
 	fmt.Println("CuEVM Debug: originalNonceMap", f.originalNonceMap)
+}
+
+func (f *Fuzzer) seedCorpus() {
+	lenPure := len(f.workers[0].pureMethods)
+	lenState := len(f.workers[0].stateChangingMethods)
+	totalMethods := lenPure + lenState
+
+	fmt.Printf("CuEVM Debug Seed Corpus: %d pure + %d state = %d total methods, %d workers\n",
+		lenPure, lenState, totalMethods, f.numCPUWorkers)
+
+	if totalMethods == 0 {
+		return
+	}
+
+	var wg sync.WaitGroup
+	methodsPerWorker := totalMethods / f.numCPUWorkers
+	remainder := totalMethods % f.numCPUWorkers
+
+	for i := 0; i < f.numCPUWorkers; i++ {
+		startIdx := i*methodsPerWorker + min(i, remainder)
+		endIdx := startIdx + methodsPerWorker
+		fmt.Println("CuEVM Debug: worker", i, "startIdx", startIdx, "endIdx", endIdx)
+		if i < remainder {
+			endIdx++
+		}
+
+		wg.Add(1)
+		go func(workerIdx, start, end int) {
+			defer wg.Done()
+			worker := f.workers[workerIdx]
+			worker.initializeABICache()
+
+			fmt.Printf("CuEVM Debug: Worker %d processing methods %d-%d\n", workerIdx, start, end)
+			if start >= totalMethods {
+				return
+			}
+			for methodIdx := start; methodIdx < end && methodIdx < totalMethods; methodIdx++ {
+				// Direct array access: pureMethods first, then stateChangingMethods
+				var selectedMethod *fuzzerTypes.DeployedContractMethod
+				if methodIdx < lenPure {
+					selectedMethod = &worker.pureMethods[methodIdx]
+				} else {
+					selectedMethod = &worker.stateChangingMethods[methodIdx-lenPure]
+				}
+
+				// Generate and test sequence
+				element, err := worker.sequenceGenerator.generateNewElementWithChosenMethod(selectedMethod, false)
+				if err != nil {
+					continue
+				}
+				element1, _ := worker.sequenceGenerator.generateNewElementWithChosenMethod(selectedMethod, true)
+
+				sequence := calls.CallSequence{element, element1}
+
+				executionCheckFunc := func(seq calls.CallSequence) (bool, error) {
+					return false, f.corpus.CheckSequenceCoverageAndUpdate(seq, worker.getNewCorpusCallSequenceWeight(), true)
+				}
+				fmt.Println("CuEVM Debug: Prepare to process seed sequence", sequence)
+				_, err = calls.SimulateExecuteCallSequenceGPUWithList(worker.chain, sequence, executionCheckFunc)
+
+				// Test sequence (inline logic from addCallSequenceCorpusLoop)
+				if worker.chain.RevertToBlockIndex(worker.testingBaseBlockIndex) != nil {
+					continue
+				}
+			}
+		}(i, startIdx, endIdx)
+	}
+
+	wg.Wait()
 }
 
 // prepareWorkersDataInParallel handles all setup logic from run() in parallel
@@ -1263,10 +1343,10 @@ func (f *Fuzzer) prepareWorkersDataInParallel() (bool, error) {
 				}
 			}
 
-			if f.loopCounter == 0 {
-				// construct staticABICallElementCache from fuzzer arrays
-				worker.initializeABICache()
-			}
+			// if f.loopCounter == 0 {
+			// 	// construct staticABICallElementCache from fuzzer arrays
+			// 	worker.initializeABICache()
+			// }
 			// fmt.Println("CuEVM Debug: workerIdx", workerIndex, "worker.shrinkCallSequenceRequests", len(worker.shrinkCallSequenceRequests))
 			// Process any pending shrink requests
 			// for _, shrinkCallSequenceRequest := range worker.shrinkCallSequenceRequests {
@@ -1307,14 +1387,14 @@ func (f *Fuzzer) prepareWorkersDataInParallel() (bool, error) {
 				return
 			}
 
-			{
-				// If we already have a chain, revert to the base state
-				err := worker.chain.RevertToBlockIndex(worker.testingBaseBlockIndex)
-				if err != nil {
-					errChan <- err
-					return
-				}
-			}
+			// {
+			// 	// If we already have a chain, revert to the base state
+			// 	err := worker.chain.RevertToBlockIndex(worker.testingBaseBlockIndex)
+			// 	if err != nil {
+			// 		errChan <- err
+			// 		return
+			// 	}
+			// }
 
 			// Prepare execution data for GPU kernel
 
@@ -1338,7 +1418,7 @@ func (f *Fuzzer) prepareWorkersDataInParallel() (bool, error) {
 			for seqIdx := 0; seqIdx < f.sequencesPerCPUWorker; seqIdx++ {
 				// Initialize a new sequence within our sequence generator
 
-				isNewSequence, err := worker.sequenceGenerator.InitializeNextSequence()
+				isNewSequence, err := worker.sequenceGenerator.InitializeNextSequence(f.loopCounter)
 				if err != nil {
 					fmt.Println("CuEVM Debug: InitializeNextSequence error, use blank sequence", err)
 					err = nil
@@ -1775,7 +1855,7 @@ func (f *Fuzzer) prepareAndProcessChainStateInGPU(testChain *chain.TestChain) er
 	// Convert state dump to JSON format
 	stateJSON := f.convertStateToJSON(&stateDump, testChain.Head().Header)
 	// CuEVM debug, to be deleted
-	// fmt.Println("CuEVM Debug: stateJSON", stateJSON)
+	fmt.Println("CuEVM Debug: stateJSON", stateJSON)
 	// print contract state id to name map
 	// fmt.Println("CuEVM Debug: contractIdToName", f.contractIdToName)
 	// os.Exit(0)
@@ -1884,8 +1964,12 @@ func (f *Fuzzer) convertStateToJSON(stateDump *ethstate.Dump, blockHeader *types
 		accountMap["balance"] = "0x" + balanceBig.Text(16)
 		if _, ok := f.shrinkWorker.deployedContracts[common.HexToAddress(addrStr)]; ok {
 			fmt.Println("CuEVM Debug: deployed contract", addrStr)
-			accountMap["balance"] = "0x0fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+			if balanceBig.Cmp(big.NewInt(0)) == 0 {
+				fmt.Println("CuEVM Debug: deployed contract balance is 0, setting to max")
+				// accountMap["balance"] = "0x0fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+			}
 		}
+
 		// Add nonce
 		accountMap["nonce"] = fmt.Sprintf("0x%x", account.Nonce)
 
@@ -2484,10 +2568,13 @@ func (f *Fuzzer) Start() error {
 		fmt.Println("CuEVM Debug: err", err)
 		fmt.Println("CuEVM Debug: pendingEvents", len(f.pendingEvents))
 		if err != nil || len(f.pendingEvents) > 0 {
-			f.logger.Error("Failed to initialize the test chain with fork, try setting runtime bytecode", err)
+			f.logger.Error("Failed to initialize the test chain, try setting runtime bytecode", err)
 			// f.config.Fuzzing.TestChainConfig.ForkConfig.ForkModeEnabled = false
+
 			genesisAlloc := make(types.GenesisAlloc)
 			for _, event := range f.pendingEvents {
+				fmt.Println("Contract Address ", event.Contract.Address)
+				fmt.Println(hex.EncodeToString(event.Contract.RuntimeBytecode))
 				genesisAlloc[event.Contract.Address] = types.Account{
 					Balance: big.NewInt(0),
 					Code:    event.Contract.RuntimeBytecode,
