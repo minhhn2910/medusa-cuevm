@@ -26,8 +26,8 @@ const (
 	GLIBC_LCG_C                  = 12345
 	CHANCE_TO_CREATE_NEW_ADDRESS = 0
 	CHANCE_TO_SKIP_MUTATE        = 50
-	// CHANCE_TO_SKIP_MUTATE_BLOCK  = 25
-	VALUE_MUTATE_INT32 = 7
+	CHANCE_TO_SKIP_MUTATE_VALUE  = 25
+	VALUE_MUTATE_INT32           = 7
 
 	// AFL-style mutation configuration
 	CHANCE_HAVOC_MUTATION = 6
@@ -325,7 +325,7 @@ func MutateBlockValues(seed uint32, blockNumberDelayMax, blockTimestampDelayMax 
 
 // MutateValue mutates a big.Int value following the CUDA logic
 func MutateValue(seed uint32, value *big.Int) uint32 {
-	if randRange(&seed, 100) <= CHANCE_TO_SKIP_MUTATE {
+	if randRange(&seed, 100) <= CHANCE_TO_SKIP_MUTATE_VALUE {
 		return seed
 	}
 

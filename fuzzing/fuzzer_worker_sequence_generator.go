@@ -225,7 +225,7 @@ func (g *CallSequenceGenerator) InitializeNextSequence(fuzzing_loop_counter int)
 
 	// If this provider has no corpus mutation methods or corpus call sequences, we return a call sequence with
 	// nil elements to signal that we want an entirely new sequence.
-	if g.mutationStrategyChooser.ChoiceCount() == 0 || g.worker.fuzzer.corpus.ActiveMutableSequenceCount() == 0 || fuzzing_loop_counter < 3 {
+	if g.mutationStrategyChooser.ChoiceCount() == 0 || g.worker.fuzzer.corpus.ActiveMutableSequenceCount() == 0 || fuzzing_loop_counter == 0 {
 		// fmt.Println("CuEVM Debug: no corpus mutation methods or corpus call sequences")
 		return true, nil
 	}

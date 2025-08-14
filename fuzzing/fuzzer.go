@@ -2089,7 +2089,13 @@ func (f *Fuzzer) launchGPUKernel() error {
 	// fmt.Println("CuEVM Debug: txBatchSize", txBatchSize)
 
 	if err == nil {
-		bigIntWeightValue := big.NewInt(max(3, int64((f.loopCounter + 1))))
+		// AFL++ perfscore *4, basic score is 1.
+		// Medusa calculates sequence tested, which is loop counter for each worker
+		bigIntWeightValue := big.NewInt(max(4, int64((f.loopCounter + 1))))
+		// cap the weight value to worker reset limit (default 50)
+		if bigIntWeightValue.Cmp(big.NewInt(50)) > 0 {
+			bigIntWeightValue = big.NewInt(50)
+		}
 		f.assertion_test_provider.GPUPostCallTest(f.workers, gpuResults, f.gpuMarkerOffsets, bigIntWeightValue)
 
 		// add all call sequences to corpus
