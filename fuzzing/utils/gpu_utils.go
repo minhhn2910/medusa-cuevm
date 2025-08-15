@@ -26,7 +26,7 @@ const (
 	GLIBC_LCG_C                  = 12345
 	CHANCE_TO_CREATE_NEW_ADDRESS = 0
 	CHANCE_TO_SKIP_MUTATE        = 50
-	CHANCE_TO_SKIP_MUTATE_VALUE  = 0
+	CHANCE_TO_SKIP_MUTATE_VALUE  = 25
 	VALUE_MUTATE_INT32           = 7
 
 	// AFL-style mutation configuration

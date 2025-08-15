@@ -1855,7 +1855,7 @@ func (f *Fuzzer) prepareAndProcessChainStateInGPU(testChain *chain.TestChain) er
 	// Convert state dump to JSON format
 	stateJSON := f.convertStateToJSON(&stateDump, testChain.Head().Header)
 	// CuEVM debug, to be deleted
-	fmt.Println("CuEVM Debug: stateJSON", stateJSON)
+	// fmt.Println("CuEVM Debug: stateJSON", stateJSON)
 	// print contract state id to name map
 	// fmt.Println("CuEVM Debug: contractIdToName", f.contractIdToName)
 	// os.Exit(0)

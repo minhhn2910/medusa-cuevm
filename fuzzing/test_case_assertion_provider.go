@@ -3,11 +3,16 @@ package fuzzing
 import (
 	"fmt"
 	"math/big"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/crytic/medusa-geth/common"
 	"github.com/crytic/medusa/compilation/abiutils"
+	"github.com/crytic/medusa/compilation/platforms"
 	"github.com/crytic/medusa/fuzzing/calls"
 	"github.com/crytic/medusa/fuzzing/config"
 	"github.com/crytic/medusa/fuzzing/contracts"
@@ -25,8 +30,9 @@ type AssertionTestCaseProvider struct {
 	fuzzer *Fuzzer
 
 	// testCases is a map of contract-method IDs to assertion test cases.GetContractMethodID
-	testCases   map[contracts.ContractMethodID]*AssertionTestCase
-	generalBugs map[uint32]*AssertionTestCase // bug_id -> bool if encountered before
+	testCases         map[contracts.ContractMethodID]*AssertionTestCase
+	generalBugs       map[uint32]*AssertionTestCase // bug_id -> bool if encountered before
+	falsePositiveBugs map[uint32]*AssertionTestCase // bug_id -> false positive bugs
 	// testCasesLock is used for thread-synchronization when updating testCases
 	testCasesLock sync.Mutex
 }
@@ -89,6 +95,7 @@ func (t *AssertionTestCaseProvider) onFuzzerStarting(event FuzzerStartingEvent) 
 	// Reset our state
 	t.testCases = make(map[contracts.ContractMethodID]*AssertionTestCase)
 	t.generalBugs = make(map[uint32]*AssertionTestCase)
+	t.falsePositiveBugs = make(map[uint32]*AssertionTestCase)
 	// Create a test case for every test method.
 	for _, contract := range t.fuzzer.ContractDefinitions() {
 		// If we're not testing all contracts, verify the current contract is one we specified in our target contracts
@@ -340,7 +347,7 @@ func (t *AssertionTestCaseProvider) GPUPostCallTest(workers []*FuzzerWorker, gpu
 						err = nil
 					}
 				} else {
-					fmt.Println("\n\nCuEVM Debug: inputValues empty\n\n")
+					fmt.Println("CuEVM Debug: inputValues empty")
 					inputValues = []any{}
 				}
 
@@ -437,6 +444,8 @@ func (t *AssertionTestCaseProvider) GPUPostCallTest(workers []*FuzzerWorker, gpu
 					callSequence:    &fullSequence,
 					bugTime:         time.Since(t.fuzzer.fuzzStartTime).Seconds(), // seconds
 				}
+
+				// Add all bugs to general bugs first, false positive filtering happens later
 				t.fuzzer.RegisterTestCase(testCase)
 				t.generalBugs[bug_id] = testCase
 				select {
@@ -447,7 +456,7 @@ func (t *AssertionTestCaseProvider) GPUPostCallTest(workers []*FuzzerWorker, gpu
 					// Successfully enqueued
 				default:
 					fmt.Println("addSequenceCorpusChan full, adding sequence directly to corpus")
-					err = t.fuzzer.corpus.AddCallSequence(fullSequence, bigIntWeightValue)
+					_ = t.fuzzer.corpus.AddCallSequence(fullSequence, bigIntWeightValue)
 				}
 				// fmt.Println("CuEVM Debug: bug_id", bug_id, "testCase", testCase)
 				// fmt.Println("Time now, start time, elapsed", time.Now(), t.fuzzer.fuzzStartTime, time.Since(t.fuzzer.fuzzStartTime))
@@ -471,17 +480,146 @@ func (t *AssertionTestCaseProvider) GPUPostCallTest(workers []*FuzzerWorker, gpu
 	return total_bugs_encountered > 0, nil
 }
 
-func (t *AssertionTestCaseProvider) getAllBugReported() []*AssertionTestCase {
-	bugs := make([]*AssertionTestCase, 0, len(t.generalBugs))
-	for _, v := range t.generalBugs {
-		bugs = append(bugs, v)
+// getFalsePositivePCs gets false positive PCs for a contract's arithmetic bugs
+func (t *AssertionTestCaseProvider) getFalsePositivePCs(contractName string, pcs []uint32) map[uint32]bool {
+	fpPCs := make(map[uint32]bool)
+
+	if len(pcs) == 0 {
+		return fpPCs
 	}
-	fmt.Printf("CuEVM Debug: Found %d bugs:\n", len(bugs))
-	for i, bug := range bugs {
+
+	// Find source path for the contract
+	sourcePath := ""
+	for _, contract := range t.fuzzer.ContractDefinitions() {
+		if contract.Name() == contractName {
+			sourcePath = contract.SourcePath()
+			break
+		}
+	}
+
+	if sourcePath == "" {
+		fmt.Println("CuEVM Debug: no source path found", contractName)
+		return fpPCs // No source path found
+	}
+
+	// Find script path
+	executablePath, _ := os.Executable()
+
+	executableDir := filepath.Dir(executablePath)
+	scriptPath := filepath.Join(executableDir, "solidityutils", "filter_fp.py")
+
+	if _, err := os.Stat(scriptPath); os.IsNotExist(err) {
+		scriptPath = "solidityutils/filter_fp.py"
+		if _, err := os.Stat(scriptPath); os.IsNotExist(err) {
+			fmt.Println("CuEVM Debug: script not found", scriptPath)
+			return fpPCs // Script not found
+		}
+	}
+
+	// Prepare command arguments
+	platformConfig, _ := t.fuzzer.config.Compilation.GetPlatformConfig()
+	cryticConfig, ok := platformConfig.(*platforms.CryticCompilationConfig)
+	if ok {
+		fmt.Println("Solc Version:", cryticConfig.SolcVersion)
+	} else {
+		fmt.Println("platformConfig is not of type CryticCompilationConfig")
+	}
+	args := []string{scriptPath, contractName, sourcePath, cryticConfig.SolcVersion}
+	for _, pc := range pcs {
+		args = append(args, fmt.Sprintf("%d", pc))
+	}
+
+	// Execute Python script
+	cmd := exec.Command("python3", args...)
+	fmt.Println("CuEVM Debug: cmd", cmd)
+	output, err := cmd.Output()
+	fmt.Println("CuEVM Debug: output", string(output))
+	if err != nil {
+		return fpPCs // Script failed
+	}
+
+	// Parse output - space-separated list of false positive PCs
+	outputStr := strings.TrimSpace(string(output))
+	if outputStr == "" {
+		return fpPCs // No false positives
+	}
+
+	fpPCStrs := strings.Fields(outputStr)
+	for _, pcStr := range fpPCStrs {
+		var parsedPC uint32
+		if _, err := fmt.Sscanf(pcStr, "%d", &parsedPC); err == nil {
+			fpPCs[parsedPC] = true
+		}
+	}
+
+	return fpPCs
+}
+
+func (t *AssertionTestCaseProvider) getAllBugReported() []*AssertionTestCase {
+	// First, process false positives by batching arithmetic bugs by contract
+	t.processFalsePositives()
+
+	validBugs := make([]*AssertionTestCase, 0, len(t.generalBugs))
+	fpBugs := make([]*AssertionTestCase, 0, len(t.falsePositiveBugs))
+
+	// Separate valid bugs and false positives
+	for _, v := range t.generalBugs {
+		validBugs = append(validBugs, v)
+	}
+
+	for _, v := range t.falsePositiveBugs {
+		fpBugs = append(fpBugs, v)
+	}
+
+	fmt.Printf("CuEVM Debug: Found %d valid bugs and %d false positives:\n", len(validBugs), len(fpBugs))
+	for i, bug := range validBugs {
 		fmt.Printf("  CuEVM_BUG_REPORT %d: Contract=%s, Method=%s, Type=%d, PC=%d, Time=%f\n",
 			i, bug.bugContractName, bug.targetMethod.Name, bug.bugType, bug.bugPC, bug.bugTime)
 	}
-	return bugs
+
+	if len(fpBugs) > 0 {
+		fmt.Printf("CuEVM Debug: False positives filtered:\n")
+		for i, bug := range fpBugs {
+			fmt.Printf("  CuEVM_FP %d: Contract=%s, Method=%s, Type=%d, PC=%d, Time=%f\n",
+				i, bug.bugContractName, bug.targetMethod.Name, bug.bugType, bug.bugPC, bug.bugTime)
+		}
+	}
+
+	return validBugs
+}
+
+// processFalsePositives batches arithmetic bugs by contract and filters false positives
+func (t *AssertionTestCaseProvider) processFalsePositives() {
+	// Group arithmetic bugs by contract
+	contractPCs := make(map[string][]uint32)
+	bugIdMap := make(map[string]map[uint32]uint32) // contract -> pc -> bug_id
+
+	for bug_id, bug := range t.generalBugs {
+		if bug.bugType == CuEVM_INTEGER_BUG {
+			contractName := bug.bugContractName
+			if contractPCs[contractName] == nil {
+				contractPCs[contractName] = []uint32{}
+				bugIdMap[contractName] = make(map[uint32]uint32)
+			}
+			contractPCs[contractName] = append(contractPCs[contractName], bug.bugPC)
+			bugIdMap[contractName][bug.bugPC] = bug_id
+		}
+	}
+
+	// Process each contract's bugs in batch
+	for contractName, pcs := range contractPCs {
+		fpPCs := t.getFalsePositivePCs(contractName, pcs)
+
+		// Move false positive bugs to separate map
+		for pc := range fpPCs {
+			if bug_id, exists := bugIdMap[contractName][pc]; exists {
+				bug := t.generalBugs[bug_id]
+				delete(t.generalBugs, bug_id)
+				t.falsePositiveBugs[bug_id] = bug
+				fmt.Printf("CuEVM Debug: Filtered FP - Contract=%s, PC=%d\n", contractName, pc)
+			}
+		}
+	}
 }
 
 // encounteredAssertionFailure takes in a panic code and a config.AssertionModesConfig and will determine whether the
