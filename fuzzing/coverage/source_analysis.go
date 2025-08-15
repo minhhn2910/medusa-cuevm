@@ -441,6 +441,7 @@ func determineLinesCovered(cm *ContractCoverageMap, bytecode []byte, logger *log
 
 	// Traverse the instructions from top to bottom, keeping track of hit count as we go
 	hit := uint64(0)
+	pcs := make(map[uint64]bool)
 	for idx, pc := range indexToOffset {
 		enterCount := uint64(0)    // count of jumpdest + contract initial enter (ENTER_MARKER_XOR)
 		revertCount := uint64(0)   // count of revert (REVERT_MARKER_XOR)
@@ -479,11 +480,21 @@ func determineLinesCovered(cm *ContractCoverageMap, bytecode []byte, logger *log
 		successfulHits[idx] = hit - revertCount
 		revertedHits[idx] = revertCount
 		hit -= allLeaveCount
+		if successfulHits[idx] > 0 || revertedHits[idx] > 0 {
+			pcs[uint64(pc)] = true
+		}
 	}
 	if hit != 0 {
 		logger.Warn("WARNING: Nonzero final hit count. The coverage report will be inaccurate. This is a bug; please report it at https://github.com/crytic/medusa/issues. Debug info: hit: %d, len(bytecode): %d, len(indexToOffset): %d.\n", hit, len(bytecode), len(indexToOffset))
 	}
-
+	all_pcs := make([]uint64, 0, len(pcs))
+	for k := range pcs {
+		all_pcs = append(all_pcs, k)
+	}
+	sort.Slice(all_pcs, func(i, j int) bool {
+		return all_pcs[i] < all_pcs[j]
+	})
+	fmt.Println("CuEVM Debug: all_pcs (sorted, length:", len(all_pcs), ")", all_pcs)
 	return successfulHits, revertedHits
 }
 
