@@ -616,7 +616,7 @@ func (f *Fuzzer) AddCompilationTargets(compilations []compilationTypes.Compilati
 				for _, contract := range f.contractDefinitions {
 					fmt.Printf("CuEVM Debug: contract: %s\n", contract.Name())
 					if len(contract.CompiledContract().Abi.Constructor.Inputs) > 0 {
-						fmt.Printf("CuEVM Debug: contract:", contract.CompiledContract().Abi.Constructor)
+						// fmt.Printf("CuEVM Debug: contract:", contract.CompiledContract().Abi.Constructor)
 						args, err := contract.CompiledContract().Abi.Constructor.Inputs.Unpack(argsBytesDecoded)
 						if err != nil {
 							fmt.Printf("CuEVM Debug: failed to unpack constructor arguments: %v\n", err)
@@ -624,10 +624,16 @@ func (f *Fuzzer) AddCompilationTargets(compilations []compilationTypes.Compilati
 						}
 						args_count := 0
 						for _, arg := range args {
+							// fmt.Printf("CuEVM Debug: arg: %v\n", arg)
 							if arg != nil {
-								fmt.Printf("CuEVM Debug: adding address: to fuzableReturnAddress %s\n", arg.(common.Address))
-								f.fuzableReturnAddress[arg.(common.Address)] = true
-								args_count++
+								// Check if the argument is actually an address before casting
+								if addr, ok := arg.(common.Address); ok {
+									fmt.Printf("CuEVM Debug: adding address: to fuzableReturnAddress %s\n", addr.Hex())
+									f.fuzableReturnAddress[addr] = true
+									args_count++
+								} else {
+									fmt.Printf("CuEVM Debug: skipping non-address argument of type %T\n", arg)
+								}
 							}
 							if args_count > 8 {
 								break
