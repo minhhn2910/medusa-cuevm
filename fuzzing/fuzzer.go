@@ -251,6 +251,8 @@ type Fuzzer struct {
 
 	specialSenderAddr []common.Address // if an adress is in the map, it is a special sender
 
+	fuzableReturnAddress map[common.Address]bool // if an address is in the map, its return data is fuzzable
+
 	// Pre-allocated arrays for GPU processing to avoid repeated allocations
 	gpuDataOffsets   []uint32
 	gpuDataSizes     []uint32
@@ -350,6 +352,7 @@ func NewFuzzer(config config.ProjectConfig) (*Fuzzer, error) {
 		contractCodeHashToName: make(map[common.Hash]string),
 		contractIdToName:       make(map[uint32]string),
 		sendersIndexMap:        make(map[common.Address]uint8),
+		fuzableReturnAddress:   make(map[common.Address]bool),
 		revertReporter:         revertReporter,
 		Hooks: FuzzerHooks{
 			NewCallSequenceGeneratorConfigFunc: defaultCallSequenceGeneratorConfigFunc,
@@ -532,6 +535,8 @@ func (f *Fuzzer) AddCompilationTargets(compilations []compilationTypes.Compilati
 						break
 					}
 					sender_set[address] = true
+
+					f.fuzableReturnAddress[address] = true
 				}
 			}
 		}
@@ -601,6 +606,38 @@ func (f *Fuzzer) AddCompilationTargets(compilations []compilationTypes.Compilati
 			}
 		}
 
+		fmt.Printf("CuEVM Debug: fuzableReturnAddress: %v\n", f.config.Fuzzing.ConstructorArgsBytes)
+		// try to decode constructor arguments and add to fuzableReturnAddress if the constructorargsbytes is set
+		if f.config.Fuzzing.ConstructorArgsBytes != "" {
+			argsBytes := strings.TrimPrefix(f.config.Fuzzing.ConstructorArgsBytes, "0x")
+			// Decode hex string to bytes
+			argsBytesDecoded, err := hex.DecodeString(argsBytes)
+			if err == nil {
+				for _, contract := range f.contractDefinitions {
+					fmt.Printf("CuEVM Debug: contract: %s\n", contract.Name())
+					if len(contract.CompiledContract().Abi.Constructor.Inputs) > 0 {
+						fmt.Printf("CuEVM Debug: contract:", contract.CompiledContract().Abi.Constructor)
+						args, err := contract.CompiledContract().Abi.Constructor.Inputs.Unpack(argsBytesDecoded)
+						if err != nil {
+							fmt.Printf("CuEVM Debug: failed to unpack constructor arguments: %v\n", err)
+							continue
+						}
+						args_count := 0
+						for _, arg := range args {
+							if arg != nil {
+								fmt.Printf("CuEVM Debug: adding address: to fuzableReturnAddress %s\n", arg.(common.Address))
+								f.fuzableReturnAddress[arg.(common.Address)] = true
+								args_count++
+							}
+							if args_count > 8 {
+								break
+							}
+						}
+					}
+				}
+			}
+		}
+
 		// Cache all of our source code if it hasn't been already.
 		err := compilation.CacheSourceCode()
 		if err != nil {
@@ -638,6 +675,10 @@ func (f *Fuzzer) createTestChain(additionalGenesisAlloc *types.GenesisAlloc) (*c
 			Balance: big.NewInt(0),
 		}
 	}
+
+	f.BaseValueSet().AddAddress(contractAddr)
+	f.BaseValueSet().SyncArrays()
+
 	genesisAlloc[contractAddr].Balance.SetString("0fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", 16)
 
 	// temporarily hardcode the path to the attacker code
@@ -678,6 +719,47 @@ func (f *Fuzzer) createTestChain(additionalGenesisAlloc *types.GenesisAlloc) (*c
 				Balance: balance,
 				Code:    attackerCode,
 				Nonce:   0,
+			}
+		}
+
+		enhancedAttackerHex, err := os.ReadFile(filepath.Join(executableDir, "solidityutils/AttackerTransparentEnhanced.bin-runtime"))
+		if err == nil {
+			attackerCode, err = hex.DecodeString(strings.TrimSpace(string(enhancedAttackerHex)))
+		}
+		if err != nil {
+			log.Printf("Failed to read attacker code: %v", err)
+		}
+		if err == nil {
+			all_addresses := f.baseValueSet.Addresses()
+			all_integers := f.baseValueSet.Integers()
+			two256 := new(big.Int).Lsh(big.NewInt(1), 256)
+			for fuzzableReturnAddress := range f.fuzableReturnAddress {
+				balance := new(big.Int)
+				balance.SetString("ffffffffffffffffffffffffffffffffffffffffffffffff", 16)
+				storage := make(map[common.Hash]common.Hash)
+				// 8 first addresses from value map
+				// 16 first numbers from value map
+
+				for i := 0; i < 8; i++ {
+					if i < len(all_addresses) {
+						address_bigint := new(big.Int).SetBytes(all_addresses[i].Bytes())
+						storage[common.BigToHash(big.NewInt(int64(i)))] = common.BigToHash(address_bigint)
+					}
+				}
+				for i := 0; i < 16; i++ {
+					if i < len(all_integers) {
+						cMod := new(big.Int).Mod(all_integers[i], two256)
+						int_bytes := make([]byte, 32)
+						cMod.FillBytes(int_bytes)
+						storage[common.BigToHash(big.NewInt(int64(i+8)))] = common.BytesToHash(int_bytes)
+					}
+				}
+				genesisAlloc[fuzzableReturnAddress] = types.Account{
+					Balance: balance,
+					Code:    attackerCode,
+					Nonce:   0,
+					Storage: storage,
+				}
 			}
 		}
 	}
@@ -770,72 +852,84 @@ func chainSetupFromCompilations(fuzzer *Fuzzer, testChain *chain.TestChain) (*ex
 			// If we found a contract definition that matches this definition by name, try to deploy it
 			if contract.Name() == contractName {
 				testChain.CompiledContracts[contractName] = contract.CompiledContract()
-				// Concatenate constructor arguments, if necessary
-				args := make([]any, 0)
-				if len(contract.CompiledContract().Abi.Constructor.Inputs) > 0 {
-					// If the contract is a predeployed contract, throw an error because they do not accept constructor
-					// args.
-					if _, ok := fuzzer.config.Fuzzing.PredeployedContracts[contractName]; ok {
-						return nil, fmt.Errorf("predeployed contracts cannot accept constructor arguments")
+				// Construct our deployment message/tx data field
+				var msgData []byte
+				var err error
+
+				// Check if constructorArgsBytes is provided first
+				if fuzzer.config.Fuzzing.ConstructorArgsBytes != "" && len(contract.CompiledContract().Abi.Constructor.Inputs) > 0 {
+					msgData, err = contract.CompiledContract().GetDeploymentMessageDataWithBytes(fuzzer.config.Fuzzing.ConstructorArgsBytes)
+					if err != nil {
+						return nil, fmt.Errorf("initial contract deployment failed for contract \"%v\" using constructorArgsBytes, error: %v", contractName, err)
 					}
-					jsonArgs, ok := fuzzer.config.Fuzzing.ConstructorArgs[contractName]
-					if !ok {
-						// return nil, fmt.Errorf("constructor arguments for contract %s not provided", contractName)
-						fmt.Printf("constructor arguments for contract %s not provided, trying to randomize\n", contractName)
-						// CuEVM Debug: use random values for constructor arguments
+				} else {
+					// Concatenate constructor arguments, if necessary
+					args := make([]any, 0)
+					if len(contract.CompiledContract().Abi.Constructor.Inputs) > 0 {
+						// If the contract is a predeployed contract, throw an error because they do not accept constructor
+						// args.
+						if _, ok := fuzzer.config.Fuzzing.PredeployedContracts[contractName]; ok {
+							return nil, fmt.Errorf("predeployed contracts cannot accept constructor arguments")
+						}
+						jsonArgs, ok := fuzzer.config.Fuzzing.ConstructorArgs[contractName]
+						if !ok {
+							// return nil, fmt.Errorf("constructor arguments for contract %s not provided", contractName)
+							fmt.Printf("constructor arguments for contract %s not provided, trying to randomize\n", contractName)
+							// CuEVM Debug: use random values for constructor arguments
 
-						// Create a temporary random value generator for constructor arguments using default config
-						tempGenerator := valuegeneration.NewRandomValueGenerator(getDefaultRandomValueGeneratorConfig(), fuzzer.randomProvider)
+							// Create a temporary random value generator for constructor arguments using default config
+							tempGenerator := valuegeneration.NewRandomValueGenerator(getDefaultRandomValueGeneratorConfig(), fuzzer.randomProvider)
 
-						// Generate values for all constructor inputs
-						generatedValues := make([]any, len(contract.CompiledContract().Abi.Constructor.Inputs))
-						for i, input := range contract.CompiledContract().Abi.Constructor.Inputs {
-							generatedValues[i] = valuegeneration.GenerateAbiValue(tempGenerator, &input.Type)
+							// Generate values for all constructor inputs
+							generatedValues := make([]any, len(contract.CompiledContract().Abi.Constructor.Inputs))
+							for i, input := range contract.CompiledContract().Abi.Constructor.Inputs {
+								generatedValues[i] = valuegeneration.GenerateAbiValue(tempGenerator, &input.Type)
 
-							if input.Type.T == abi.AddressTy {
-								generatedValues[i] = fuzzer.deployer
-								fmt.Println("CuEVM Debug: generatedValues", generatedValues[i], input.Type)
-							}
-							if input.Type.T == abi.UintTy {
-								lowerName := strings.ToLower(input.Name)
-								fmt.Printf("CuEVM Debug: generatedValues[%d] type: %T, value: %v, name: %s\n", i, generatedValues[i], generatedValues[i], input.Name)
-								if strings.Contains(lowerName, "supply") || strings.Contains(lowerName, "amount") {
-									switch v := generatedValues[i].(type) {
-									case *big.Int:
-										v.SetString("1000000000000000000000000", 10)
-										fmt.Println("CuEVM Debug: set *big.Int value for", input.Name)
+								if input.Type.T == abi.AddressTy {
+									generatedValues[i] = fuzzer.deployer
+									fmt.Println("CuEVM Debug: generatedValues", generatedValues[i], input.Type)
+								}
+								if input.Type.T == abi.UintTy {
+									lowerName := strings.ToLower(input.Name)
+									fmt.Printf("CuEVM Debug: generatedValues[%d] type: %T, value: %v, name: %s\n", i, generatedValues[i], generatedValues[i], input.Name)
+									if strings.Contains(lowerName, "supply") || strings.Contains(lowerName, "amount") {
+										switch v := generatedValues[i].(type) {
+										case *big.Int:
+											v.SetString("1000000000000000000000000", 10)
+											fmt.Println("CuEVM Debug: set *big.Int value for", input.Name)
+										}
+										fmt.Println("CuEVM Debug: generatedValues", generatedValues[i], input.Name)
+									} else if strings.Contains(lowerName, "decimal") {
+										switch v := generatedValues[i].(type) {
+										case *big.Int:
+											v.SetInt64(18)
+											fmt.Println("CuEVM Debug: set *big.Int value for decimals", input.Name)
+										}
+										fmt.Println("CuEVM Debug: generatedValues", generatedValues[i], input.Name)
 									}
-									fmt.Println("CuEVM Debug: generatedValues", generatedValues[i], input.Name)
-								} else if strings.Contains(lowerName, "decimal") {
-									switch v := generatedValues[i].(type) {
-									case *big.Int:
-										v.SetInt64(18)
-										fmt.Println("CuEVM Debug: set *big.Int value for decimals", input.Name)
-									}
-									fmt.Println("CuEVM Debug: generatedValues", generatedValues[i], input.Name)
 								}
 							}
-						}
 
-						// Encode all values to JSON format (this converts big.Int to string, etc.)
-						var err error
-						jsonArgs, err = valuegeneration.EncodeJSONArgumentsToMap(contract.CompiledContract().Abi.Constructor.Inputs, generatedValues)
+							// Encode all values to JSON format (this converts big.Int to string, etc.)
+							var err error
+							jsonArgs, err = valuegeneration.EncodeJSONArgumentsToMap(contract.CompiledContract().Abi.Constructor.Inputs, generatedValues)
+							if err != nil {
+								return nil, fmt.Errorf("failed to encode generated constructor arguments for contract %s: %v", contractName, err)
+							}
+						}
+						decoded, err := valuegeneration.DecodeJSONArgumentsFromMap(contract.CompiledContract().Abi.Constructor.Inputs,
+							jsonArgs, fuzzer.deployedContractAddr)
 						if err != nil {
-							return nil, fmt.Errorf("failed to encode generated constructor arguments for contract %s: %v", contractName, err)
+							return nil, err
 						}
+						args = decoded
 					}
-					decoded, err := valuegeneration.DecodeJSONArgumentsFromMap(contract.CompiledContract().Abi.Constructor.Inputs,
-						jsonArgs, fuzzer.deployedContractAddr)
-					if err != nil {
-						return nil, err
-					}
-					args = decoded
-				}
 
-				// Construct our deployment message/tx data field
-				msgData, err := contract.CompiledContract().GetDeploymentMessageData(args)
-				if err != nil {
-					return nil, fmt.Errorf("initial contract deployment failed for contract \"%v\", error: %v", contractName, err)
+					// Construct our deployment message/tx data field using args
+					msgData, err = contract.CompiledContract().GetDeploymentMessageData(args)
+					if err != nil {
+						return nil, fmt.Errorf("initial contract deployment failed for contract \"%v\", error: %v", contractName, err)
+					}
 				}
 
 				// If our project config has a non-zero balance for this target contract, retrieve it
@@ -1190,7 +1284,7 @@ func (f *Fuzzer) spawnWorkersLoop(baseTestChain *chain.TestChain) error {
 
 		f.loopCounter++
 
-		// if f.loopCounter == 3 {
+		// if f.loopCounter == 1 {
 		// 	working = false
 		// }
 		// CuEVM Debug
@@ -1796,6 +1890,8 @@ func (f *Fuzzer) runTransactionsGPU(workers []*FuzzerWorker, txBatchSize, sequen
 		fmt.Println("CuEVM Debug: GPU execution returned no results")
 	} else {
 		fmt.Println("CuEVM Debug: C function returned nil result")
+		return nil, errors.New("GPU processing failed (C function returned nil)")
+
 	}
 	return nil, nil
 }
@@ -1972,45 +2068,52 @@ func (f *Fuzzer) convertStateToJSON(stateDump *ethstate.Dump, blockHeader *types
 
 		// Add nonce
 		accountMap["nonce"] = fmt.Sprintf("0x%x", account.Nonce)
+		if _, ok := f.fuzableReturnAddress[common.HexToAddress(addrStr)]; ok {
+			accountMap["code"] = "0x12345678" // 4 bytes for fuzzable return address
+			accountMap["storage"] = make(map[string]string)
+			fmt.Println("CuEVM Debug: processfuzzable return address", addrStr)
+			// fmt.Println("discarded storage ", account.Storage)
+		} else {
+			// Add code if it exists
+			if len(account.Code) > 0 {
 
-		// Add code if it exists
-		if len(account.Code) > 0 {
-			accountMap["code"] = "0x" + hex.EncodeToString(account.Code)
-			// get the code hash
-			codeHash := crypto.Keccak256Hash(account.Code)
-			contractName, ok := f.contractCodeHashToName[codeHash]
-			if ok {
-				// fmt.Println("CuEVM Debug: contractName", contractName)
-				accountMap["contractName"] = contractName
-				if len(addrStr) >= 4 { // Need at least "0x" + 2 hex chars
-					lastByteHex := addrStr[len(addrStr)-2:]
-					lastByteInt, _ := strconv.ParseInt(lastByteHex, 16, 32)
-					f.contractIdToName[uint32(lastByteInt)] = contractName
+				accountMap["code"] = "0x" + hex.EncodeToString(account.Code)
+				// get the code hash
+				codeHash := crypto.Keccak256Hash(account.Code)
+				contractName, ok := f.contractCodeHashToName[codeHash]
+				if ok {
+					// fmt.Println("CuEVM Debug: contractName", contractName)
+					accountMap["contractName"] = contractName
+					if len(addrStr) >= 4 { // Need at least "0x" + 2 hex chars
+						lastByteHex := addrStr[len(addrStr)-2:]
+						lastByteInt, _ := strconv.ParseInt(lastByteHex, 16, 32)
+						f.contractIdToName[uint32(lastByteInt)] = contractName
+					}
+
+				} else {
+					// fmt.Println("CuEVM Debug: contractName not found for code hash", codeHash.Hex())
 				}
 
 			} else {
-				// fmt.Println("CuEVM Debug: contractName not found for code hash", codeHash.Hex())
+				accountMap["code"] = "0x"
 			}
 
-		} else {
-			accountMap["code"] = "0x"
-		}
+			// Add storage if it exists
+			if len(account.Storage) > 0 {
+				storage := make(map[string]string)
+				for key, value := range account.Storage {
+					// Remove "0x" prefix if present in value
+					if strings.HasPrefix(value, "0x") {
+						value = value[2:]
+					}
 
-		// Add storage if it exists
-		if len(account.Storage) > 0 {
-			storage := make(map[string]string)
-			for key, value := range account.Storage {
-				// Remove "0x" prefix if present in value
-				if strings.HasPrefix(value, "0x") {
-					value = value[2:]
+					// Store as "0x..." format
+					storage["0x"+hex.EncodeToString(key.Bytes())] = "0x" + value
 				}
-
-				// Store as "0x..." format
-				storage["0x"+hex.EncodeToString(key.Bytes())] = "0x" + value
+				accountMap["storage"] = storage
+			} else {
+				accountMap["storage"] = make(map[string]string)
 			}
-			accountMap["storage"] = storage
-		} else {
-			accountMap["storage"] = make(map[string]string)
 		}
 
 		// Add to pre state
@@ -2596,12 +2699,6 @@ func (f *Fuzzer) Start() error {
 		// f.logger.Info("Finished setting up test chain with fork")
 	}
 	f.logger.Info("Finished setting up test chain")
-
-	// update value set
-	for _, address := range f.deployedContractAddr {
-		f.BaseValueSet().AddAddress(address)
-	}
-	f.BaseValueSet().SyncArrays()
 
 	// Initialize our coverage maps by measuring the coverage we get from the corpus.
 	var corpusActiveSequences, corpusTotalSequences int
