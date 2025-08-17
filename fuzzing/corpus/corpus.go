@@ -61,6 +61,9 @@ type Corpus struct {
 	// callSequences.
 	callSequencesLock sync.Mutex
 
+	// trackingMapsLock provides thread synchronization for the tracking maps
+	trackingMapsLock sync.Mutex
+
 	// logger describes the Corpus's log object that can be used to log important events
 	logger *logging.Logger
 }
@@ -594,6 +597,9 @@ func (c *Corpus) CheckSequenceCoverageAndUpdateWithIds(callSequence calls.CallSe
 	shouldAddSequence := false
 	var coverageIdToUse *uint32
 
+	// Lock only the tracking maps with separate mutex
+	c.trackingMapsLock.Lock()
+
 	// 1. Check covered branch ID - add if new
 	if lastCoverageId > 0 && !c.coveredIds[lastCoverageId] {
 		c.coveredIds[lastCoverageId] = true
@@ -627,6 +633,9 @@ func (c *Corpus) CheckSequenceCoverageAndUpdateWithIds(callSequence calls.CallSe
 			break // Only need one new storage ID to trigger addition
 		}
 	}
+
+	// Unlock tracking maps
+	c.trackingMapsLock.Unlock()
 
 	// 4. Traditional coverage update
 	if coverageUpdated {
