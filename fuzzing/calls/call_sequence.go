@@ -36,7 +36,7 @@ func (cs CallSequence) Log() *logging.LogBuffer {
 		buffer.Append(fmt.Sprintf("%d) %s\n", i+1, cs[i].String()))
 
 		// If we have an execution trace attached, print information about it.
-		if cs[i].ExecutionTrace != nil {
+		if cs[i] != nil && cs[i].ExecutionTrace != nil {
 			buffer.Append(cs[i].ExecutionTrace.Log().Elements()...)
 			buffer.Append("\n")
 		}
@@ -230,6 +230,9 @@ func (cse *CallSequenceElement) DecodedReturnValues() ([]any, error) {
 
 // String returns a displayable string representing the CallSequenceElement.
 func (cse *CallSequenceElement) String() string {
+	if cse == nil {
+		return "<none>"
+	}
 	// Obtain our contract name
 	contractName := "<unresolved contract>"
 	if cse.Contract != nil {

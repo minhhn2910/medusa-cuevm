@@ -1,13 +1,13 @@
 package fuzzing
 
 import (
-	"github.com/crytic/medusa/fuzzing/config"
+	"math/big"
 	"math/rand"
-
-	"github.com/crytic/medusa/fuzzing/executiontracer"
 
 	"github.com/crytic/medusa/chain"
 	"github.com/crytic/medusa/fuzzing/calls"
+	"github.com/crytic/medusa/fuzzing/config"
+	"github.com/crytic/medusa/fuzzing/executiontracer"
 	"github.com/crytic/medusa/fuzzing/valuegeneration"
 )
 
@@ -72,4 +72,14 @@ type ShrinkCallSequenceRequest struct {
 	// RecordResultInCorpus indicates whether the shrunken call sequence should be recorded in the corpus. If so, when
 	// the shrinking operation is completed, the sequence will be added to the corpus if it doesn't already exist.
 	RecordResultInCorpus bool
+}
+
+// AddSequenceCorpusRequest is a structure signifying a request to add a call sequence to the corpus.
+type AddSequenceCorpusRequest struct {
+	// Sequence represents the call sequence to be added to the corpus
+	Sequence calls.CallSequence
+	// Weight represents the weight to assign to this sequence in the corpus
+	Weight *big.Int
+	// CoverageId represents the coverage ID for potential replacement logic
+	CoverageId *uint32
 }
