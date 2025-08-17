@@ -497,9 +497,12 @@ func (f *Fuzzer) AddCompilationTargets(compilations []compilationTypes.Compilati
 	fmt.Printf("CuEVM Debug: platformConfig: %s\n", platformConfig)
 	// Retrieve the compilation target for slither
 	target := platformConfig.GetTarget()
-
+	isEtherScan := strings.HasPrefix(target, "CUEVM_ETHERSCAN_TARGET")
+	if isEtherScan {
+		target = strings.TrimPrefix(target, "CUEVM_ETHERSCAN_TARGET")
+	}
 	// Run slither and handle errors
-	slitherResults, err := f.config.Slither.RunSlither(target)
+	slitherResults, err := f.config.Slither.RunSlither(target, isEtherScan)
 	if err != nil || slitherResults == nil {
 		if err != nil {
 			f.logger.Warn("Failed to run slither", err)

@@ -46,7 +46,7 @@ func (c *CryticCompilationConfig) Platform() string {
 // GetTarget returns the target for compilation
 func (c *CryticCompilationConfig) GetTarget() string {
 	if c.EtherscanJsonFile {
-		return c.Target + " --compile-force-framework etherscan --etherscan-json-file " + c.Target
+		return "CUEVM_ETHERSCAN_TARGET" + c.Target
 	}
 	return c.Target
 }
