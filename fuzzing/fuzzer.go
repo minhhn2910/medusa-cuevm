@@ -237,6 +237,7 @@ type Fuzzer struct {
 	functionsWithImpactsCache []string            // signatures that have impacts (for first element)
 	normalizedSigCache        map[string]string   // signature -> normalized signature
 
+	storageSlotAccessed map[uint32]bool // mapping of storage slot to accessed
 	// convenient fuzzing metrics storage
 	callsTested   int
 	fuzzStartTime time.Time
@@ -353,6 +354,7 @@ func NewFuzzer(config config.ProjectConfig) (*Fuzzer, error) {
 		contractIdToName:       make(map[uint32]string),
 		sendersIndexMap:        make(map[common.Address]uint8),
 		fuzableReturnAddress:   make(map[common.Address]bool),
+		storageSlotAccessed:    make(map[uint32]bool),
 		revertReporter:         revertReporter,
 		Hooks: FuzzerHooks{
 			NewCallSequenceGeneratorConfigFunc: defaultCallSequenceGeneratorConfigFunc,
@@ -1877,9 +1879,27 @@ func (f *Fuzzer) runTransactionsGPU(workers []*FuzzerWorker, txBatchSize, sequen
 							storageInfo := storageInfoSlice[j]
 							gpuResult.NewStorageThreadIdx[i] = append(gpuResult.NewStorageThreadIdx[i], uint32(storageInfo.storage_thread_idx))
 							gpuResult.NewStorageIds[i] = append(gpuResult.NewStorageIds[i], uint32(storageInfo.storage_id))
-							// for ease of use, just append everything to coverage idx. It will be added to corpus
-							gpuResult.NewCoverageThreadIdx[i] = append(gpuResult.NewCoverageThreadIdx[i], uint32(storageInfo.storage_thread_idx))
-							gpuResult.NewCoverageIds[i] = append(gpuResult.NewCoverageIds[i], uint32(storageInfo.storage_id))
+
+							// fmt.Println("CuEVM Debug: storageInfo", storageInfo.storage_thread_idx, storageInfo.storage_id)
+							// decode the storage id to address and slot
+							isWrite := (storageInfo.storage_id >> 30) & 0x3
+							// accountId := (storageInfo.storage_id >> 16) & 0x3FFF
+							storageSlot := storageInfo.storage_id & 0xFFFF
+							if isWrite == 0 {
+								f.storageSlotAccessed[uint32(storageSlot)] = true
+							} else {
+								if f.storageSlotAccessed[uint32(storageSlot)] {
+									// fmt.Println("CuEVM Debug: storage slot", storageSlot, "is accessed should add to")
+									// os.Exit(1)
+									gpuResult.NewCoverageThreadIdx[i] = append(gpuResult.NewCoverageThreadIdx[i], uint32(storageInfo.storage_thread_idx))
+									gpuResult.NewCoverageIds[i] = append(gpuResult.NewCoverageIds[i], uint32(storageInfo.storage_id))
+								}
+							}
+							// fmt.Println("CuEVM Debug: Decoded storage_id - isWrite:", isWrite, "accountId:", accountId, "storageSlot:", storageSlot)
+
+							// // for ease of use, just append everything to coverage idx. It will be added to corpus
+							// gpuResult.NewCoverageThreadIdx[i] = append(gpuResult.NewCoverageThreadIdx[i], uint32(storageInfo.storage_thread_idx))
+							// gpuResult.NewCoverageIds[i] = append(gpuResult.NewCoverageIds[i], uint32(storageInfo.storage_id))
 						}
 					}
 				}
