@@ -43,6 +43,11 @@ type Corpus struct {
 	// coverageIdToFile maps coverage IDs to their corresponding file names for replacement logic
 	coverageIdToFile map[uint32]string
 
+	// Tracking maps for different ID types
+	storageIds     map[uint32]bool  // Track which storage IDs exist
+	missedIdToDist map[uint32]uint8 // Track missed branch ID to distance bits
+	coveredIds     map[uint32]bool  // Track which coverage IDs exist
+
 	// unexecutedCallSequences defines the callSequences which have not yet been executed by the fuzzer. As each item
 	// is selected for execution by the fuzzer on startup, it is removed. This way, all call sequences loaded from disk
 	// are executed to check for test failures.
@@ -70,6 +75,9 @@ func NewCorpus(corpusDirectory string) (*Corpus, error) {
 		callSequenceFiles:       newCorpusDirectory[calls.CallSequence](""),
 		testResultSequenceFiles: newCorpusDirectory[calls.CallSequence](""),
 		coverageIdToFile:        make(map[uint32]string),
+		storageIds:              make(map[uint32]bool),
+		missedIdToDist:          make(map[uint32]uint8),
+		coveredIds:              make(map[uint32]bool),
 		unexecutedCallSequences: make([]calls.CallSequence, 0),
 		logger:                  logging.GlobalLogger.NewSubLogger("module", "corpus"),
 	}
@@ -555,6 +563,89 @@ func (c *Corpus) CheckSequenceCoverageAndUpdate(callSequence calls.CallSequence,
 			return err
 		}
 	}
+	return nil
+}
+
+// CheckSequenceCoverageAndUpdateWithIds handles coverage updates with branch and storage ID tracking
+func (c *Corpus) CheckSequenceCoverageAndUpdateWithIds(callSequence calls.CallSequence, mutationChooserWeight *big.Int, flushImmediately bool) error {
+	// If we have no calls in our sequence, there is nothing to do.
+	if len(callSequence) == 0 {
+		return nil
+	}
+
+	// Obtain our coverage maps and IDs for our last call.
+	lastCall := callSequence[len(callSequence)-1]
+	lastCallChainReference := lastCall.ChainReference
+	lastMessageResult := lastCallChainReference.Block.MessageResults[lastCallChainReference.TransactionIndex]
+
+	lastMessageCoverageMaps, lastCoverageId, lastMissedId, distanceBits, storageIds := coverage.GetCoverageTracerResultsWithIds(lastMessageResult)
+
+	// If we have none, because a coverage tracer wasn't attached when processing this call, we can stop.
+	if lastMessageCoverageMaps == nil {
+		return nil
+	}
+
+	// Check traditional coverage updates
+	coverageUpdated, err := c.coverageMaps.Update(lastMessageCoverageMaps)
+	if err != nil {
+		return err
+	}
+
+	shouldAddSequence := false
+	var coverageIdToUse *uint32
+
+	// 1. Check covered branch ID - add if new
+	if lastCoverageId > 0 && !c.coveredIds[lastCoverageId] {
+		c.coveredIds[lastCoverageId] = true
+		shouldAddSequence = true
+		coverageIdToUse = &lastCoverageId
+		fmt.Printf("New covered branch ID: %d\n", lastCoverageId)
+	}
+
+	// 2. Check missed branch ID - add if new or distance improved
+	if lastMissedId > 0 && distanceBits >= 0 {
+		existingDistance, exists := c.missedIdToDist[lastMissedId]
+		if !exists || distanceBits < existingDistance {
+			c.missedIdToDist[lastMissedId] = distanceBits
+			shouldAddSequence = true
+			coverageIdToUse = &lastMissedId
+			if exists {
+				fmt.Printf("Improved missed branch ID: %d (distance: %d -> %d)\n", lastMissedId, existingDistance, distanceBits)
+			} else {
+				fmt.Printf("New missed branch ID: %d (distance: %d)\n", lastMissedId, distanceBits)
+			}
+		}
+	}
+
+	// 3. Check storage IDs - add if any are new
+	for _, storageId := range storageIds {
+		if !c.storageIds[storageId] {
+			c.storageIds[storageId] = true
+			shouldAddSequence = true
+			coverageIdToUse = &storageId
+			fmt.Printf("New storage ID: %d\n", storageId)
+			break // Only need one new storage ID to trigger addition
+		}
+	}
+
+	// 4. Traditional coverage update
+	if coverageUpdated {
+		shouldAddSequence = true
+		fmt.Printf("Traditional coverage updated\n")
+	}
+
+	// Add sequence if any condition was met
+	if shouldAddSequence {
+		if coverageIdToUse != nil {
+			err = c.addCallSequenceWithCoverageId(c.callSequenceFiles, callSequence, true, mutationChooserWeight, flushImmediately, coverageIdToUse)
+		} else {
+			err = c.addCallSequence(c.callSequenceFiles, callSequence, true, mutationChooserWeight, flushImmediately)
+		}
+		if err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 

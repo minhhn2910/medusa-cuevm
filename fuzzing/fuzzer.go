@@ -36,7 +36,7 @@ import (
 	// ethstate "github.com/ethereum/go-ethereum/core/state"
 
 	// Change the import from ethereum/go-ethereum to crytic/medusa-geth
-	ethstate "github.com/crytic/medusa-geth/core/state"
+
 	// "github.com/ethereum/go-ethereum/core/types"
 
 	"unsafe"
@@ -1274,10 +1274,10 @@ func (f *Fuzzer) spawnWorkersLoop(baseTestChain *chain.TestChain) error {
 			continue
 		}
 
-		// Step 2: Launch GPU kernel - focusing only on testNextCallSequence
-		err = f.launchGPUKernel()
+		// Step 2: Launch CPU kernel - focusing only on testNextCallSequence
+		err = f.launchCPUKernel()
 		if err != nil {
-			fmt.Println("CuEVM Debug: launchGPUKernel error", err)
+			fmt.Println("CuEVM Debug: launchCPUKernel error", err)
 			return err
 		}
 
@@ -1905,6 +1905,7 @@ func (f *Fuzzer) runTransactionsGPU(workers []*FuzzerWorker, txBatchSize, sequen
 	return nil, nil
 }
 
+/*
 // prepareAndProcessChainStateInGPU extracts the chain state and block header information and sends it to the GPU
 func (f *Fuzzer) prepareAndProcessChainStateInGPU(testChain *chain.TestChain) error {
 	if f.GPUchainInitiated {
@@ -2169,206 +2170,164 @@ func (f *Fuzzer) convertStateToJSON(stateDump *ethstate.Dump, blockHeader *types
 
 	return string(jsonBytes)
 }
+*/
+// launchCPUKernel runs all sequences on CPU with mutations applied before execution
+func (f *Fuzzer) launchCPUKernel() error {
+	f.logger.Info("\n\nLaunching CPU kernel to execute call sequences with mutations\n\n")
 
-// launchGPUKernel modification to handle chain state properly
-func (f *Fuzzer) launchGPUKernel() error {
-	f.logger.Info("Launching GPU kernel to execute call sequences with prepared element lists")
+	// Update the current random seed for mutation consistency
+	f.currentRandomSeed = uint32(f.randomProvider.Int31())
 
-	// CuEVM debug, to be deleted
-	// Extract transaction data from first element of each sequence
-	// for i := 0; i < len(f.workers); i++ {
-	// 	for j := 0; j < len(f.workers[i].callSequenceElements); j++ {
-	// 		for k := 0; k < len(f.workers[i].callSequenceElements[j]); k++ {
-	// 			fmt.Println("CuEVM Debug CPU: worker", i, "sequence", j, "element", k, "call", f.workers[i].callSequenceElements[j][k])
-	// 		}
-	// 	}
-	// }
-
-	// Process state data from our base test chain for GPU processing
-	if len(f.workers) > 0 && f.workers[0] != nil && f.workers[0].chain != nil {
-		err := f.prepareAndProcessChainStateInGPU(f.workers[0].chain)
-		if err != nil {
-			f.logger.Warn("Failed to prepare state data for GPU", err)
-		}
-	}
-	// CuEVM May version, send back the idx in all sequence elements for seed update.
+	// Calculate batch sizes for mutation indexing
 	txBatchSizeGPU := f.sequencesPerCPUWorker * f.numCPUWorkers * f.skipSequenceSize
-	txBatchSizeCPU := f.sequencesPerCPUWorker * f.numCPUWorkers // we dont have to skip sequence for CPU
-	sequenceLength := f.config.Fuzzing.CallSequenceLength
-	gpuResults, err := f.runTransactionsGPU(f.workers, txBatchSizeGPU, sequenceLength)
-	// fmt.Println("CuEVM Debug: gpuResults", gpuResults.DebugString(), "err", err)
-	// fmt.Println("CuEVM Debug: markerOffsets", markerOffsets)
-	// fmt.Println("CuEVM Debug: txBatchSize", txBatchSize)
+	f.numInstancesPerDevice = txBatchSizeGPU
 
-	if err == nil {
-		// AFL++ perfscore *4, basic score is 1.
-		// Medusa calculates sequence tested, which is loop counter for each worker
-		bigIntWeightValue := big.NewInt(max(4, int64((f.loopCounter + 1))))
-		// cap the weight value to worker reset limit (default 50)
-		if bigIntWeightValue.Cmp(big.NewInt(50)) > 0 {
-			bigIntWeightValue = big.NewInt(50)
-		}
-		f.assertion_test_provider.GPUPostCallTest(f.workers, gpuResults, f.gpuMarkerOffsets, bigIntWeightValue)
+	// Run workers in parallel
+	var wg sync.WaitGroup
+	errChan := make(chan error, f.numCPUWorkers)
 
-		// add all call sequences to corpus
-		for batchIdx := 0; batchIdx < len(gpuResults.NewCoverageThreadIdx); batchIdx++ {
-			// fmt.Println("\n\nCuEVM Debug: batchIdx", batchIdx, "\n\n")
-			for idx := 0; idx < len(gpuResults.NewCoverageThreadIdx[batchIdx]); idx++ {
-				// translate from gpu idx to cpu idx (no skip sequence)
-				rawIdx := int(gpuResults.NewCoverageThreadIdx[batchIdx][idx]) / f.skipSequenceSize
-				workerIdx := rawIdx / f.sequencesPerCPUWorker
-				sequenceIdx := rawIdx % f.sequencesPerCPUWorker
-				elementIdx := batchIdx
-				// fmt.Println("CuEVM Debug: batchIdx", batchIdx, "raw gpu idx", int(gpuResults.NewCoverageIndices[batchIdx][idx]), "rawIdx", rawIdx, "workerIdx", workerIdx, "sequenceIdx", sequenceIdx, "elementIdx", elementIdx)
-				// Create a sequence from element 0 to elementIdx
-				fullSequence := make(calls.CallSequence, elementIdx+1)
-				for i := 0; i <= elementIdx; i++ {
+	for workerIdx := 0; workerIdx < len(f.workers); workerIdx++ {
+		wg.Add(1)
+		go func(wIdx int) {
+			defer wg.Done()
 
-					fullSequence[i], _ = f.workers[workerIdx].callSequenceElements[sequenceIdx][i].Clone()
+			worker := f.workers[wIdx]
+			if worker == nil {
+				return
+			}
 
-					// Warning i is element index in a squence
-					// Need to reply i when reconstructing the sequence
-					markerOffsetIdx := (rawIdx + i*txBatchSizeCPU)
-					methodSig := fullSequence[i].Call.DataAbiValues.Method.Sig
-					// fmt.Println("CuEVM Debug: markerOffsetIdx", markerOffsetIdx, "methodSig", methodSig)
-					var dataMarkers []calls.DataMarker
-					if f.gpuMarkerOffsets[markerOffsetIdx] < 0 {
-						dataMarkers = f.staticABIMarkers[f.staticABIMarkerIndexMap[methodSig]]
-					} else {
-						// fmt.Println("CuEVM Debug: markerOffsets[markerOffsetIdx] (sequenceIdx/f.skipSequenceSize)*f.skipSequenceSize", markerOffsets[markerOffsetIdx], "sequenceIdx", sequenceIdx, "i", i)
-						dataMarkers = f.workers[workerIdx].callSequenceElements[sequenceIdx][i].Call.DataMarkers
-					}
-					// fmt.Println("CuEVM Debug: dataMarkers, signature", dataMarkers, methodSig)
-					// dataMarkers := f.workers[workerIdx].callSequenceElements[(sequenceIdx/f.skipSequenceSize)*f.skipSequenceSize][i].Call.DataMarkers
-					// fmt.Println("CuEVM Debug: fullSequence[i].Call.Data", hex.EncodeToString(fullSequence[i].Call.Data))
-					// mutatedData, mutatedBlockNumber, mutatedBlockTimestamp, mutatedValue := f.restore_mutation(fullSequence[i].Call.Data, dataMarkers, int(gpuResults.NewCoverageIndices[batchIdx][idx]), i)
-					// fmt.Println("CuEVM Debug: fullSequence[i].BlockNumberDelay", fullSequence[i].BlockNumberDelay)
-					mutatedData, mutatedBlockNumber, mutatedBlockTimestamp, mutatedSenderIndex, mutatedValue :=
-						fuzzingutils.RestoreMutation(fullSequence[i].Call.Data, dataMarkers, int(gpuResults.NewCoverageThreadIdx[batchIdx][idx]), i,
-							fuzzingutils.FuzzerConfig{
-								StartSeed:              f.currentRandomSeed,
-								BatchSize:              uint32(txBatchSizeGPU),
-								NumInstancesPerDevice:  f.numInstancesPerDevice,
-								AddressConstants:       f.addressConstants,
-								IntegerConstants:       f.integerConstants,
-								BlockNumberDelayMax:    60480 * 2, // hardcode for now
-								BlockTimestampDelayMax: 604800 * 4,
-								SenderCount:            uint32(len(f.senders)),
-								IsReentrancySender:     fullSequence[i].Call.From == common.HexToAddress(REENTRANCY_ATTACKER_ADDRESS),
-								IsRandomSender:         fullSequence[i].Call.From == common.HexToAddress(RANDOM_ATTACKER_ADDRESS),
-							})
+			// Check for emergency context cancellation
+			if utils.CheckContextDone(f.emergencyCtx) || utils.CheckContextDone(f.ctx) {
+				return
+			}
 
-					// Apply mutated block values if they were changed (non-zero)
-					if i == 0 {
-						fullSequence[i].BlockNumberDelay = max(1, f.workers[workerIdx].callSequenceElements[sequenceIdx][0].BlockNumberDelay) + uint64(max(1, int64(mutatedBlockNumber))) - 1          // first block is 1
-						fullSequence[i].BlockTimestampDelay = max(1, f.workers[workerIdx].callSequenceElements[sequenceIdx][0].BlockTimestampDelay) + uint64(max(1, int64(mutatedBlockTimestamp))) - 1 // first block is 1
-					} else {
-						fullSequence[i].BlockNumberDelay = uint64(max(1, int64(mutatedBlockNumber)))
-						fullSequence[i].BlockTimestampDelay = uint64(max(1, int64(mutatedBlockTimestamp)))
+			// Apply mutations to all sequences for this worker
+			for sequenceIdx := 0; sequenceIdx < len(worker.callSequenceElements); sequenceIdx++ {
+				for elementIdx := 0; elementIdx < len(worker.callSequenceElements[sequenceIdx]); elementIdx++ {
+					element := worker.callSequenceElements[sequenceIdx][elementIdx]
+					if element == nil || element.Call == nil {
+						continue
 					}
 
-					if mutatedSenderIndex >= 0 {
-						fullSequence[i].Call.From = f.senders[mutatedSenderIndex]
-					}
-
-					fullSequence[i].Call.Value = mutatedValue
-					var inputValues []any
-
-					if len(mutatedData) >= 4 {
-						if fullSequence[i].Call.DataAbiValues.Method.Sig != "CuEVM::fallback()" {
-							inputData := mutatedData[4:] // skip the method ID
-							inputValues, err = fullSequence[i].Call.DataAbiValues.Method.Inputs.Unpack(inputData)
-						} else {
-							inputValues, err = fullSequence[i].Call.DataAbiValues.Method.Inputs.Unpack(mutatedData)
+					// Apply mutations for each skip sequence variant
+					for skipIdx := 0; skipIdx < f.skipSequenceSize; skipIdx++ {
+						// Check for cancellation in inner loops too
+						if utils.CheckContextDone(f.emergencyCtx) || utils.CheckContextDone(f.ctx) {
+							return
 						}
 
-					} else {
-						fmt.Println("\n\nCuEVM Debug: inputValues empty\n\n")
-						inputValues = []any{}
+						// Calculate GPU thread index for this mutation
+						rawIdx := wIdx*f.sequencesPerCPUWorker + sequenceIdx
+						gpuThreadIdx := rawIdx*f.skipSequenceSize + skipIdx
+
+						// Get data markers
+						methodSig := element.Call.DataAbiValues.Method.Sig
+						var dataMarkers []calls.DataMarker
+						if cachedOffset, exists := worker.staticABIMarkerOffsetCache[methodSig]; exists {
+							dataMarkers = f.staticABIMarkers[f.staticABIMarkerIndexMap[methodSig]]
+							_ = cachedOffset // Use cached markers
+						} else {
+							dataMarkers = element.Call.DataMarkers
+						}
+
+						// Apply mutation
+						mutatedData, mutatedBlockNumber, mutatedBlockTimestamp, mutatedSenderIndex, mutatedValue :=
+							fuzzingutils.RestoreMutation(element.Call.Data, dataMarkers, gpuThreadIdx, elementIdx,
+								fuzzingutils.FuzzerConfig{
+									StartSeed:              f.currentRandomSeed,
+									BatchSize:              uint32(txBatchSizeGPU),
+									NumInstancesPerDevice:  f.numInstancesPerDevice,
+									AddressConstants:       f.addressConstants,
+									IntegerConstants:       f.integerConstants,
+									BlockNumberDelayMax:    60480 * 2,
+									BlockTimestampDelayMax: 604800 * 4,
+									SenderCount:            uint32(len(f.senders)),
+									IsReentrancySender:     element.Call.From == common.HexToAddress(REENTRANCY_ATTACKER_ADDRESS),
+									IsRandomSender:         element.Call.From == common.HexToAddress(RANDOM_ATTACKER_ADDRESS),
+								})
+
+						// Create mutated sequence for this skip variant
+						mutatedSequence := make(calls.CallSequence, len(worker.callSequenceElements[sequenceIdx]))
+						for i := range worker.callSequenceElements[sequenceIdx] {
+							if worker.callSequenceElements[sequenceIdx][i] != nil {
+								mutatedSequence[i], _ = worker.callSequenceElements[sequenceIdx][i].Clone()
+							}
+						}
+
+						// Apply mutations to the current element
+						if mutatedSequence[elementIdx] != nil && mutatedSequence[elementIdx].Call != nil {
+							// Apply block timing mutations
+							if elementIdx == 0 {
+								mutatedSequence[elementIdx].BlockNumberDelay = max(1, element.BlockNumberDelay) + uint64(max(1, int64(mutatedBlockNumber))) - 1
+								mutatedSequence[elementIdx].BlockTimestampDelay = max(1, element.BlockTimestampDelay) + uint64(max(1, int64(mutatedBlockTimestamp))) - 1
+							} else {
+								mutatedSequence[elementIdx].BlockNumberDelay = uint64(max(1, int64(mutatedBlockNumber)))
+								mutatedSequence[elementIdx].BlockTimestampDelay = uint64(max(1, int64(mutatedBlockTimestamp)))
+							}
+
+							// Apply sender mutation
+							if mutatedSenderIndex >= 0 {
+								mutatedSequence[elementIdx].Call.From = f.senders[mutatedSenderIndex]
+							}
+
+							// Apply value mutation
+							mutatedSequence[elementIdx].Call.Value = mutatedValue
+
+							// Apply data mutation
+							mutatedSequence[elementIdx].Call.Data = mutatedData
+
+							// Update ABI values if possible
+							var inputValues []any
+							if len(mutatedData) >= 4 {
+								if mutatedSequence[elementIdx].Call.DataAbiValues.Method.Sig != "CuEVM::fallback()" {
+									inputData := mutatedData[4:] // skip method ID
+									inputValues, _ = mutatedSequence[elementIdx].Call.DataAbiValues.Method.Inputs.Unpack(inputData)
+								} else {
+									inputValues, _ = mutatedSequence[elementIdx].Call.DataAbiValues.Method.Inputs.Unpack(mutatedData)
+								}
+							}
+							if inputValues != nil {
+								mutatedSequence[elementIdx].Call.DataAbiValues.InputValues = inputValues
+							}
+						}
+						// fmt.Println("\n\nCuEVM Debug: mutatedSequence", mutatedSequence)
+						// Execute the mutated sequence
+						worker.executionCheckFunc = func(currentlyExecutedSequence calls.CallSequence) (bool, error) {
+							return false, f.corpus.CheckSequenceCoverageAndUpdateWithIds(currentlyExecutedSequence, worker.getNewCorpusCallSequenceWeight(), true)
+						}
+
+						// Reset chain to base state
+						err := worker.chain.RevertToBlockIndex(worker.testingBaseBlockIndex)
+						if err != nil {
+							f.logger.Warn("Failed to revert chain state", err)
+							continue
+						}
+
+						// Execute the sequence
+						_, execErr := calls.SimulateExecuteCallSequenceGPUWithList(
+							worker.chain,
+							mutatedSequence,
+							worker.executionCheckFunc,
+						)
+
+						if execErr != nil {
+							f.logger.Debug("Sequence execution error (expected for some mutations)", execErr)
+						}
 					}
-					if err != nil {
-						fmt.Println("\n\nCuEVM Debug: unpack error\n\n", err)
-						// skip unpack if err occurs
-						err = nil
-
-					}
-
-					// fmt.Println("CuEVM debug original data ", hex.EncodeToString(fullSequence[i].Call.Data))
-					fullSequence[i].Call.DataAbiValues.InputValues = inputValues
-					// fmt.Println("CuEVM Debug: fullSequence[i].Call.DataAbiValues.InputValues", fullSequence[i].Call.DataAbiValues.InputValues)
-					fullSequence[i].Call.Data = mutatedData
-					// fmt.Println("CuEVM debug mutated value", hex.EncodeToString(mutatedValue.Bytes()))
-					// fmt.Println("CuEVM debug mutated value", mutatedValue)
-					// fmt.Println("CuEVM debug mutated block number", mutatedBlockNumber)
-					// fmt.Println("CuEVM debug mutated block timestamp", mutatedBlockTimestamp)
-					// fmt.Println("CuEVM debug mutated data ", hex.EncodeToString(mutatedData))
-					// fmt.Println("CuEVM debug new inputValues", inputValues)
-
-					// fmt.Println("CuEVM Debug: Call element", fullSequence[i])
-				}
-
-				fmt.Println("CuEVM Debug: GPU adding sequence to corpus bigIntWeightValue, branch id", bigIntWeightValue, gpuResults.NewCoverageIds[batchIdx][idx])
-				// fmt.Println("CuEVM Debug: fullSequence", fullSequence)
-				// Send sequence to shrink worker for execution and corpus addition with coverage ID
-				select {
-				case f.shrinkWorker.addSequenceCorpusChan <- AddSequenceCorpusRequest{
-					Sequence:   fullSequence,
-					Weight:     bigIntWeightValue,
-					CoverageId: &gpuResults.NewCoverageIds[batchIdx][idx],
-				}:
-					// Successfully enqueued
-				default:
-					fmt.Println("addSequenceCorpusChan full, adding sequence directly to corpus")
-					err = f.corpus.AddCallSequenceWithCoverageId(fullSequence, bigIntWeightValue, gpuResults.NewCoverageIds[batchIdx][idx])
-				}
-				if err != nil {
-					return err
 				}
 			}
-		}
-
+		}(workerIdx)
 	}
 
-	// CuEVM Debug, simulate the run on CPU
-	// Now process transaction data for each worker
-	/*
-		for i := 0; i < len(f.workers); i++ {
-			worker := f.workers[i]
-			if worker == nil || worker.chain == nil {
-				continue
-			}
+	// Wait for all workers to complete
+	wg.Wait()
+	close(errChan)
 
-			// Check if we should stop execution
-			if utils.CheckContextDone(f.emergencyCtx) || utils.CheckContextDone(f.ctx) {
-				break
-			}
+	// Check if there were any errors
+	for err := range errChan {
+		return err
+	}
 
-			// Execute each sequence individually, resetting chain state before each one
-			for sequenceIdx, sequence := range worker.callSequenceElements {
-				// fmt.Println("CuEVM Debug: sequenceIdx", sequenceIdx, "sequence", sequence)
-				// Reset chain to base state before executing this sequence
-				err := worker.chain.RevertToBlockIndex(worker.testingBaseBlockIndex)
-				if err != nil {
-					worker.lastExecutionError = err
-					break
-				}
-				// fmt.Println("CuEVM Debug: worker.chain.RevertToBlockIndex(worker.testingBaseBlockIndex)", worker.chain.RevertToBlockIndex(worker.testingBaseBlockIndex))
-
-				// Execute this single sequence
-				_, worker.lastExecutionError = calls.SimulateExecuteCallSequenceGPUWithList(
-					worker.chain,
-					sequence,
-					worker.executionCheckFunc,
-				)
-
-				// If there was an error executing this sequence, break out of the sequence loop
-				if worker.lastExecutionError != nil {
-					f.logger.Warn("Error executing sequence", sequenceIdx, "for worker", i, ":", worker.lastExecutionError)
-					break
-				}
-			}
-		}
-	*/
 	return nil
 }
 
@@ -2528,7 +2487,7 @@ func (f *Fuzzer) RunAllSequences() {
 		worker := f.workers[i]
 		// Create a simple execution check function just for recording coverage
 		worker.executionCheckFunc = func(currentlyExecutedSequence calls.CallSequence) (bool, error) {
-			err := f.corpus.CheckSequenceCoverageAndUpdate(currentlyExecutedSequence, worker.getNewCorpusCallSequenceWeight(), true)
+			err := f.corpus.CheckSequenceCoverageAndUpdateWithIds(currentlyExecutedSequence, worker.getNewCorpusCallSequenceWeight(), true)
 			if err != nil {
 				return true, err
 			}
