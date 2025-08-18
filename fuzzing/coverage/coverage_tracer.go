@@ -444,6 +444,21 @@ func (t *CoverageTracer) trackStorageOperation(addr common.Address, slot common.
 		return
 	}
 
+	// Check if storage slot is less than 16-bit uint max (matching GPU condition)
+	// GPU code: if (key->words[0] < 65535 && key->words[1] == 0)
+	// Check if the slot value fits in 16 bits (first 30 bytes must be zero, last 2 bytes < 65535)
+	isSmallSlot := true
+	for i := 0; i < 30; i++ {
+		if slot[i] != 0 {
+			isSmallSlot = false
+			break
+		}
+	}
+	storage_slot_value := uint32(slot[30])<<8 | uint32(slot[31])
+	if !isSmallSlot || storage_slot_value >= 65535 {
+		return // Skip tracking for large storage slots
+	}
+
 	// Convert address to account_id (using last 4 bytes)
 	account_id := uint32(0)
 	if len(addr) >= 4 {
@@ -454,7 +469,7 @@ func (t *CoverageTracer) trackStorageOperation(addr common.Address, slot common.
 	}
 
 	// Get storage slot as uint16 (using last 2 bytes)
-	storage_slot := uint16(slot[30])<<8 | uint16(slot[31])
+	storage_slot := uint16(storage_slot_value)
 
 	// Create storage ID following GPU format:
 	// [31:30] 2 bits: is_write (last 2 bits)
