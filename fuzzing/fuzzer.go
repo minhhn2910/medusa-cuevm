@@ -39,8 +39,6 @@ import (
 
 	// "github.com/ethereum/go-ethereum/core/types"
 
-	"unsafe"
-
 	"encoding/hex"
 	"encoding/json"
 
@@ -59,83 +57,6 @@ import (
 	"golang.org/x/exp/slices"
 )
 
-/*
-#cgo CFLAGS: -I${SRCDIR}/../../CuEVM-internal  -I${SRCDIR}/../../CuEVM-internal/CuEVM/include
-#cgo LDFLAGS: -L${SRCDIR}/../../CuEVM-internal/build -lcuevm_go -Wl,-rpath,${SRCDIR}/../../CuEVM-internal/build
-#include <stdlib.h>
-#include <stdbool.h>
-#include <stdint.h>
-#include <string.h>
-
-// Only declare the functions that are actually implemented
-int run_interpreter_go(const char* json_input, uint32_t skip_trace_parsing, uint32_t copy_state_data,
-                       uint32_t reuse_state_data);
-
-					   // Define C-compatible structures that can be shared with Go
-// Define C-compatible structures that can be shared with Go
-typedef struct {
-    uint8_t* data;  // Pointer to the return data
-    uint32_t length;  // Length of the return data
-} ReturnDataEntry;
-
-
-typedef struct {
-    uint32_t bug_thread_idx;  // Thread index
-    uint32_t bug_id;          // id of the bug (pc << 16 | bug_type) // to be decoded
-} BugInfoEntry;
-
-typedef struct {
-    uint32_t branch_thread_idx;  // Thread index
-    uint32_t branch_id;          // Branch ID (pc_src << 16 | pc_dst) // to be decoded
-} BranchInfoEntry;
-
-typedef struct {
-    uint32_t storage_thread_idx;  // Thread index
-    uint32_t
-        storage_id;  // Storage ID (account_idx (8bit) | storate_type (8bit) | storage_slot (16bit)) // to be decoded
-    // storage_type: 1 for write, 2 for read, 3 for balance
-} StorageInfoEntry;
-
-typedef struct {
-    uint32_t new_branch_count;
-    uint32_t new_bug_count;
-    uint32_t new_storage_count;
-} GPUFeedbackCount;
-
-typedef struct {
-    BranchInfoEntry* new_branch_info;
-    uint32_t num_new_branch;
-    BugInfoEntry* new_bug_info;
-    uint32_t num_new_bug;
-    StorageInfoEntry* new_storage_info;
-    uint32_t num_new_storage;
-} SimplifiedGPUResultSingleBatchC;
-
-typedef struct {
-    SimplifiedGPUResultSingleBatchC* results;
-    uint32_t num_results;
-} SimplifiedGPUResultC;
-
-// Updated function declaration with reuse_state_data parameter
-SimplifiedGPUResultC* process_batch_transactions(const uint64_t* blockNumber, const uint64_t* timeStamp,
-                                                 const unsigned char* fromAddr, const unsigned char* toAddr,
-                                                 const unsigned char* values,
-                                                 const unsigned char* callData,
-                                                 uint32_t callDataLen, const uint32_t* dataOffsets,
-                                                 const uint32_t* dataSizes, const int32_t* markerOffsets,
-												 const uint32_t* markerData,
-												 uint32_t markerDataLen, uint32_t txBatchCount, uint32_t sequenceLength, uint32_t start_seed);
-
-// Updated function declaration with reset_state parameter
-// int process_json_state_gpu(const char* json_state, uint32_t num_instances, bool reset_state);
-int process_json_state_gpu(const char* json_state, uint32_t num_instances, bool reset_state, uint32_t skipTxSize, const char* constants,
-							const uint32_t* markerData, uint32_t markerDataLen);
-
-uint32_t get_num_instances_per_device();
-
-// Function to free SimplifiedGPUResultC
-void free_simplified_gpu_result(SimplifiedGPUResultC* result);
-*/
 import "C"
 
 // Fuzzer represents an Ethereum smart contract fuzzing provider.
@@ -687,6 +608,39 @@ func (f *Fuzzer) createTestChain(additionalGenesisAlloc *types.GenesisAlloc) (*c
 
 	f.BaseValueSet().AddAddress(contractAddr)
 	f.BaseValueSet().SyncArrays()
+	// Sort for deterministic order
+	addressSet := f.BaseValueSet().Addresses()
+	integerSet := f.BaseValueSet().Integers()
+
+	for _, addr := range addressSet {
+		fmt.Println("CuEVM Debug: address", addr.Hex())
+	}
+
+	for _, integer := range integerSet {
+		fmt.Println("CuEVM Debug: integer", hex.EncodeToString(integer.Bytes()))
+	}
+
+	sendersList := make([]string, len(f.senders))
+	specialSenderAddr := make([]common.Address, 0)
+	for i, addr := range f.senders {
+		sendersList[i] = addr.Hex()
+		if addr == common.HexToAddress(RANDOM_ATTACKER_ADDRESS) || addr == common.HexToAddress(REENTRANCY_ATTACKER_ADDRESS) {
+			specialSenderAddr = append(specialSenderAddr, addr)
+		}
+	}
+	for _, sender := range sendersList {
+		fmt.Println("CuEVM Debug: sender", sender)
+	}
+	fmt.Println("CuEVM Debug: specialSenderAddr", specialSenderAddr)
+	// groupConstantsByTypeHex groups slither constants by type and converts values to hex strings as required.
+	groupedConstants := groupConstantsByTypeHex(addressSet, integerSet)
+	groupedConstants["sender"] = sendersList
+
+	f.addressConstants = groupedConstants["address"]
+	f.integerConstants = groupedConstants["integer"]
+	// add special sender addresses to address constants
+	f.addressConstants = append(f.addressConstants, common.HexToAddress(REENTRANCY_ATTACKER_ADDRESS).Hex())
+	f.addressConstants = append(f.addressConstants, common.HexToAddress(RANDOM_ATTACKER_ADDRESS).Hex())
 
 	genesisAlloc[contractAddr].Balance.SetString("0fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", 16)
 
@@ -1293,7 +1247,7 @@ func (f *Fuzzer) spawnWorkersLoop(baseTestChain *chain.TestChain) error {
 
 		f.loopCounter++
 
-		// if f.loopCounter == 1 {
+		// if f.loopCounter == 3 {
 		// 	working = false
 		// }
 		// CuEVM Debug
@@ -1416,6 +1370,7 @@ func (f *Fuzzer) prepareWorkersDataInParallel() (bool, error) {
 	// 	// Clear shrink requests now that they've been processed
 
 	// }
+	// fmt.Println("CuEVM Debug: prepareWorkersDataInParallel")
 	for i := 0; i < f.numCPUWorkers; i++ {
 		wg.Add(1)
 		go func(workerIndex int) {
@@ -1425,7 +1380,7 @@ func (f *Fuzzer) prepareWorkersDataInParallel() (bool, error) {
 			if worker == nil {
 				return
 			}
-			worker.shrinkCallSequenceRequests = nil
+			// worker.shrinkCallSequenceRequests = nil
 
 			// Check for emergency context cancellation
 			if utils.CheckContextDone(f.emergencyCtx) {
@@ -1452,21 +1407,21 @@ func (f *Fuzzer) prepareWorkersDataInParallel() (bool, error) {
 			// }
 			// fmt.Println("CuEVM Debug: workerIdx", workerIndex, "worker.shrinkCallSequenceRequests", len(worker.shrinkCallSequenceRequests))
 			// Process any pending shrink requests
-			// for _, shrinkCallSequenceRequest := range worker.shrinkCallSequenceRequests {
-			// 	if utils.CheckContextDone(f.emergencyCtx) {
-			// 		cancelChan <- true
-			// 		return
-			// 	}
-			// 	if worker.chain == nil {
-			// 		fmt.Println("worker.chain is nil, skipping shrink call sequence request")
-			// 		break
-			// 	}
-			// 	_, err := worker.shrinkCallSequence(shrinkCallSequenceRequest)
-			// 	if err != nil {
-			// 		errChan <- err
-			// 		return
-			// 	}
-			// }
+			for _, shrinkCallSequenceRequest := range worker.shrinkCallSequenceRequests {
+				if utils.CheckContextDone(f.emergencyCtx) {
+					cancelChan <- true
+					return
+				}
+				if worker.chain == nil {
+					fmt.Println("worker.chain is nil, skipping shrink call sequence request")
+					break
+				}
+				_, err := worker.shrinkCallSequence(shrinkCallSequenceRequest)
+				if err != nil {
+					errChan <- err
+					return
+				}
+			}
 			// CuEVM async equivalent
 			// for _, shrinkCallSequenceRequest := range worker.shrinkCallSequenceRequests {
 			// 	if utils.CheckContextDone(f.emergencyCtx) {
@@ -1482,7 +1437,7 @@ func (f *Fuzzer) prepareWorkersDataInParallel() (bool, error) {
 			// 	}
 			// }
 			// // // Clear shrink requests now that they've been processed
-			// worker.shrinkCallSequenceRequests = nil
+			worker.shrinkCallSequenceRequests = nil
 
 			// If fuzzing is complete, signal cancellation
 			if fuzzingComplete {
@@ -1490,14 +1445,14 @@ func (f *Fuzzer) prepareWorkersDataInParallel() (bool, error) {
 				return
 			}
 
-			// {
-			// 	// If we already have a chain, revert to the base state
-			// 	err := worker.chain.RevertToBlockIndex(worker.testingBaseBlockIndex)
-			// 	if err != nil {
-			// 		errChan <- err
-			// 		return
-			// 	}
-			// }
+			{
+				// If we already have a chain, revert to the base state
+				err := worker.chain.RevertToBlockIndex(worker.testingBaseBlockIndex)
+				if err != nil {
+					errChan <- err
+					return
+				}
+			}
 
 			// Prepare execution data for GPU kernel
 
@@ -1607,6 +1562,7 @@ func (f *Fuzzer) prepareWorkersDataInParallel() (bool, error) {
 	return false, nil
 }
 
+/*
 // prepareAndProcessTransactionDataInGPU extracts transaction data from call sequence elements and sends it to the GPU
 func (f *Fuzzer) runTransactionsGPU(workers []*FuzzerWorker, txBatchSize, sequenceLength int) (*coverage.GPUExecutionResult, error) {
 	fmt.Println("\nGo: Preparing transaction data in batch for GPU processing worker\n")
@@ -1768,29 +1724,7 @@ func (f *Fuzzer) runTransactionsGPU(workers []*FuzzerWorker, txBatchSize, sequen
 	if len(markerData) > 0 {
 		cMarkerData = (*C.uint)(unsafe.Pointer(&markerData[0]))
 	}
-	/*
-		fmt.Println("CuEVM Debug: callData length", len(callData))
-		fmt.Println("CuEVM Debug: dataOffsets length", len(dataOffsets))
-		fmt.Println("CuEVM Debug: dataSizes length", len(dataSizes))
-		fmt.Println("CuEVM Debug: values length", len(values))
-		fmt.Println("CuEVM Debug: validCallCount", validCallCount)
-		fmt.Print("CuEVM Debug: dataOffsets & dataSizes: ")
-		for i := 0; i < validCallCount; i++ {
-			fmt.Printf("[%d]:(%d,%d) ", i, dataOffsets[i], dataSizes[i])
-		}
-		fmt.Println() // Add a newline at the end
-		/// print all call data
-		if len(callData) > 0 {
-			fmt.Print("CuEVM Debug: callData: ")
-			for i, b := range callData {
-				if i > 0 && i%4 == 0 {
-					fmt.Print(" ")
-				}
-				fmt.Printf("%02x", b)
-			}
-			fmt.Println() // Add a newline at the end of the printed data
-		}
-	*/
+
 	cValues := (*C.uchar)(nil)
 
 	cResult := C.process_batch_transactions(
@@ -1905,7 +1839,7 @@ func (f *Fuzzer) runTransactionsGPU(workers []*FuzzerWorker, txBatchSize, sequen
 	return nil, nil
 }
 
-/*
+
 // prepareAndProcessChainStateInGPU extracts the chain state and block header information and sends it to the GPU
 func (f *Fuzzer) prepareAndProcessChainStateInGPU(testChain *chain.TestChain) error {
 	if f.GPUchainInitiated {
@@ -2174,7 +2108,14 @@ func (f *Fuzzer) convertStateToJSON(stateDump *ethstate.Dump, blockHeader *types
 // launchCPUKernel runs all sequences on CPU with mutations applied before execution
 func (f *Fuzzer) launchCPUKernel() error {
 	f.logger.Info("\n\nLaunching CPU kernel to execute call sequences with mutations\n\n")
-
+	// for workerIdx, worker := range f.workers {
+	// 	for sequenceIdx, sequence := range worker.callSequenceElements {
+	// 		fmt.Println("CuEVM Debug: worker", workerIdx, "sequence", sequenceIdx)
+	// 		for elementIdx, element := range sequence {
+	// 			fmt.Println("CuEVM Debug: element", elementIdx, element)
+	// 		}
+	// 	}
+	// }
 	// Update the current random seed for mutation consistency
 	f.currentRandomSeed = uint32(f.randomProvider.Int31())
 
@@ -2185,7 +2126,11 @@ func (f *Fuzzer) launchCPUKernel() error {
 	// Run workers in parallel
 	var wg sync.WaitGroup
 	errChan := make(chan error, f.numCPUWorkers)
-
+	bigIntWeightValue := big.NewInt(max(4, int64((f.loopCounter + 1))))
+	// cap the weight value to worker reset limit (default 50)
+	if bigIntWeightValue.Cmp(big.NewInt(50)) > 0 {
+		bigIntWeightValue = big.NewInt(50)
+	}
 	for workerIdx := 0; workerIdx < len(f.workers); workerIdx++ {
 		wg.Add(1)
 		go func(wIdx int) {
@@ -2291,9 +2236,34 @@ func (f *Fuzzer) launchCPUKernel() error {
 							}
 						}
 						// fmt.Println("\n\nCuEVM Debug: mutatedSequence", mutatedSequence)
+						shrinkCallSequenceRequests := make([]ShrinkCallSequenceRequest, 0)
 						// Execute the mutated sequence
 						worker.executionCheckFunc = func(currentlyExecutedSequence calls.CallSequence) (bool, error) {
-							return false, f.corpus.CheckSequenceCoverageAndUpdateWithIds(currentlyExecutedSequence, worker.getNewCorpusCallSequenceWeight(), true)
+							for _, callSequenceTestFunc := range f.Hooks.CallSequenceTestFuncs {
+								// fmt.Println("CuEVM Debug: callSequenceTestFunc", callSequenceTestFunc)
+								newShrinkRequests, err := callSequenceTestFunc(worker, currentlyExecutedSequence)
+								if err != nil {
+									// fmt.Println("CuEVM Debug: err", err)
+									return true, err
+								}
+								// fmt.Println("CuEVM Debug: newShrinkRequests", newShrinkRequests)
+								// fmt.Println("CuEVM Debug: newShrinkRequests", newShrinkRequests)
+								shrinkCallSequenceRequests = append(shrinkCallSequenceRequests, newShrinkRequests...)
+							}
+							// Obtain our coverage maps and IDs for our last call.
+							lastCall := currentlyExecutedSequence[len(currentlyExecutedSequence)-1]
+							lastCallChainReference := lastCall.ChainReference
+							lastMessageResult := lastCallChainReference.Block.MessageResults[lastCallChainReference.TransactionIndex]
+
+							evmBugs := coverage.GetCoverageTracerResultsEVMBugs(lastMessageResult)
+							if len(evmBugs) > 0 {
+								// fmt.Println("CuEVM Debug: evmBugs", evmBugs)
+								for _, bug := range evmBugs {
+									f.assertion_test_provider.CPUPostCallTest(currentlyExecutedSequence, bug, bigIntWeightValue, lastCall.Contract.Name())
+								}
+							}
+							f.corpus.CheckSequenceCoverageAndUpdateWithIds(currentlyExecutedSequence, bigIntWeightValue, true)
+							return len(shrinkCallSequenceRequests) > 0, nil
 						}
 
 						// Reset chain to base state
@@ -2313,9 +2283,20 @@ func (f *Fuzzer) launchCPUKernel() error {
 						if execErr != nil {
 							f.logger.Debug("Sequence execution error (expected for some mutations)", execErr)
 						}
+						if len(shrinkCallSequenceRequests) > 0 {
+							// fmt.Println("CuEVM Debug: shrinkCallSequenceRequests > 0", shrinkCallSequenceRequests)
+							worker.pendingShrinkRequests = append(worker.pendingShrinkRequests, shrinkCallSequenceRequests...)
+							// fmt.Println("CuEVM Debug: worker.pendingShrinkRequests len", len(worker.pendingShrinkRequests))
+							// worker.shrinkCallSequenceRequests = append(worker.shrinkCallSequenceRequests, shrinkCallSequenceRequests...)
+						}
 					}
 				}
 			}
+
+			// if len(worker.pendingShrinkRequests) > 0 {
+			// 	fmt.Println("CuEVM Debug: worker.pendingShrinkRequests", worker.pendingShrinkRequests)
+			// 	worker.shrinkCallSequenceRequests = append(worker.shrinkCallSequenceRequests, worker.pendingShrinkRequests...)
+			// }
 		}(workerIdx)
 	}
 
@@ -2334,6 +2315,7 @@ func (f *Fuzzer) launchCPUKernel() error {
 // processWorkersResultsInParallel handles all post-processing logic in parallel
 // Returns a boolean indicating if workers should be cancelled and an error if one occurred
 func (f *Fuzzer) processWorkersResultsInParallel() (bool, error) {
+	// fmt.Println("CuEVM Debug: processWorkersResultsInParallel")
 	var wg sync.WaitGroup
 	errChan := make(chan error, f.numCPUWorkers)
 	cancelChan := make(chan bool, f.numCPUWorkers)
@@ -2371,6 +2353,7 @@ func (f *Fuzzer) processWorkersResultsInParallel() (bool, error) {
 			// Add any new shrink requests to the worker's list for next iteration
 			// fmt.Println("CuEVM Debug: workerIdx", workerIndex, "worker.pendingShrinkRequests", len(worker.pendingShrinkRequests))
 			if len(worker.pendingShrinkRequests) > 0 {
+				// fmt.Println("CuEVM Debug: worker.pendingShrinkRequests > 0")
 				worker.shrinkCallSequenceRequests = append(worker.shrinkCallSequenceRequests, worker.pendingShrinkRequests...)
 			}
 

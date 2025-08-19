@@ -21,6 +21,7 @@ const coverageTracerResultsKeyLastId = "CoverageTracerResultsLastId"
 const coverageTracerResultsKeyMissedId = "CoverageTracerResultsMissedId"
 const coverageTracerResultsKeyDistanceBits = "CoverageTracerResultsDistanceBits"
 const coverageTracerResultsKeyStorageIds = "CoverageTracerResultsStorageIds"
+const coverageTracerResultsKeyEVMBugs = "CoverageTracerResultsEVMBugs"
 
 // GetCoverageTracerResults obtains CoverageMaps stored by a CoverageTracer from message results. This is nil if
 // no CoverageMaps were recorded by a tracer (e.g. CoverageTracer was not attached during this message execution).
@@ -34,6 +35,17 @@ func GetCoverageTracerResults(messageResults *types.MessageResults) *CoverageMap
 
 	// If we could not obtain them, return nil.
 	return nil
+}
+
+const MAX_BUG_TRACING = 32
+
+func GetCoverageTracerResultsEVMBugs(messageResults *types.MessageResults) []uint32 {
+	if genericResult, ok := messageResults.AdditionalResults[coverageTracerResultsKeyEVMBugs]; ok {
+		if castedResult, ok := genericResult.([]uint32); ok {
+			return castedResult
+		}
+	}
+	return []uint32{}
 }
 
 // GetCoverageTracerResultsWithIds obtains coverage data with branch and storage IDs
@@ -89,6 +101,16 @@ func RemoveCoverageTracerResults(messageResults *types.MessageResults) {
 
 // Constants for coverage tracking (matching GPU implementation)
 const HASHMAP_SIZE = 65536
+
+// EVM constants
+var maxUint256 *big.Int
+
+func init() {
+	// Initialize maxUint256 = 2^256 - 1
+	maxUint256 = new(big.Int)
+	maxUint256.SetBit(maxUint256, 256, 1)     // Set bit at position 256 to 1 (creates 2^256)
+	maxUint256.Sub(maxUint256, big.NewInt(1)) // Subtract 1 to get 2^256 - 1
+}
 
 // DistanceTracker tracks distance for missed branches
 type DistanceTracker struct {
@@ -168,6 +190,9 @@ type CoverageTracer struct {
 	// since init vs runtime produces different results from getContractCoverageMapHash.
 	// The Hash key is a contract's codehash, which uniquely identifies it.
 	codeHashCache [2]map[common.Hash]common.Hash
+
+	pendingBugs  []uint32
+	stateWritten bool
 }
 
 // coverageTracerCallFrameState tracks state across call frames in the tracer.
@@ -238,6 +263,10 @@ func (t *CoverageTracer) OnTxStart(vm *tracing.VMContext, tx *coretypes.Transact
 	t.lastDistanceBits = 0
 	t.storageIds = make([]uint32, 0)
 	t.distanceTracker = NewDistanceTracker()
+
+	// Reset bug tracking state (matching GPU logic)
+	t.pendingBugs = make([]uint32, 0)
+	t.stateWritten = false
 }
 
 // OnEnter initializes the tracing operation for the top of a call frame, as defined by tracers.Tracer.
@@ -345,9 +374,77 @@ func (t *CoverageTracer) OnOpcode(pc uint64, op byte, gas, cost uint64, scope tr
 			t.trackStorageOperation(callFrameState.address, common.BytesToHash(slot[:]), false)
 		}
 	} else if vm.OpCode(op) == vm.SSTORE {
+		t.stateWritten = true
 		if len(scopeContext.Stack.Data()) >= 2 {
 			slot := scopeContext.Stack.Back(0).Bytes32()
 			t.trackStorageOperation(callFrameState.address, common.BytesToHash(slot[:]), true)
+		}
+	}
+
+	if vm.OpCode(op) == vm.ADD {
+		// fmt.Println("CuEVM Debug: ADD operation detected - op: %s, pc: %d\n", vm.OpCode(op).String(), pc)
+		// detect overflow - check if result exceeds 2^256 - 1
+		op1 := scopeContext.Stack.Back(0).ToBig()
+		op2 := scopeContext.Stack.Back(1).ToBig()
+		res := new(big.Int)
+		res.Add(op1, op2)
+
+		if res.Cmp(maxUint256) > 0 {
+			account_id := uint32(0)
+			if len(callFrameState.address) >= 4 {
+				account_id = uint32(callFrameState.address[len(callFrameState.address)-4])<<24 |
+					uint32(callFrameState.address[len(callFrameState.address)-3])<<16 |
+					uint32(callFrameState.address[len(callFrameState.address)-2])<<8 |
+					uint32(callFrameState.address[len(callFrameState.address)-1])
+			}
+
+			bug_id := uint32(pc)<<16 | 1<<8 | (account_id & 0xFF)
+			if len(t.pendingBugs) < MAX_BUG_TRACING {
+				t.pendingBugs = append(t.pendingBugs, bug_id)
+			}
+		}
+	}
+	if vm.OpCode(op) == vm.SUB {
+		// fmt.Println("CuEVM Debug: SUB operation detected - op: %s, pc: %d\n", vm.OpCode(op).String(), pc)
+		// detect underflow
+		op1 := scopeContext.Stack.Back(0).ToBig()
+		op2 := scopeContext.Stack.Back(1).ToBig()
+		// 0 - 1 is valid
+		if op1.Cmp(op2) < 0 && (op1.Cmp(big.NewInt(0)) != 0 || op2.Cmp(big.NewInt(1)) != 0) {
+			account_id := uint32(0)
+			if len(callFrameState.address) >= 4 {
+				account_id = uint32(callFrameState.address[len(callFrameState.address)-4])<<24 |
+					uint32(callFrameState.address[len(callFrameState.address)-3])<<16 |
+					uint32(callFrameState.address[len(callFrameState.address)-2])<<8 |
+					uint32(callFrameState.address[len(callFrameState.address)-1])
+			}
+			bug_id := uint32(pc)<<16 | 1<<8 | (account_id & 0xFF)
+			if len(t.pendingBugs) < MAX_BUG_TRACING {
+				t.pendingBugs = append(t.pendingBugs, bug_id)
+			}
+		}
+	}
+	if vm.OpCode(op) == vm.MUL {
+		// fmt.Println("CuEVM Debug: MUL operation detected - op: %s, pc: %d\n", vm.OpCode(op).String(), pc)
+		// detect overflow - check if result exceeds 2^256 - 1
+		op1 := scopeContext.Stack.Back(0).ToBig()
+		op2 := scopeContext.Stack.Back(1).ToBig()
+		res := new(big.Int)
+		res.Mul(op1, op2)
+
+		if res.Cmp(maxUint256) > 0 {
+			account_id := uint32(0)
+			if len(callFrameState.address) >= 4 {
+				account_id = uint32(callFrameState.address[len(callFrameState.address)-4])<<24 |
+					uint32(callFrameState.address[len(callFrameState.address)-3])<<16 |
+					uint32(callFrameState.address[len(callFrameState.address)-2])<<8 |
+					uint32(callFrameState.address[len(callFrameState.address)-1])
+			}
+
+			bug_id := uint32(pc)<<16 | 1<<8 | (account_id & 0xFF)
+			if len(t.pendingBugs) < MAX_BUG_TRACING {
+				t.pendingBugs = append(t.pendingBugs, bug_id)
+			}
 		}
 	}
 
@@ -500,6 +597,23 @@ func (t *CoverageTracer) CaptureTxEndSetAdditionalResults(results *types.Message
 	results.AdditionalResults[coverageTracerResultsKeyMissedId] = t.lastMissedId
 	results.AdditionalResults[coverageTracerResultsKeyDistanceBits] = t.lastDistanceBits
 	results.AdditionalResults[coverageTracerResultsKeyStorageIds] = t.storageIds
+	// fmt.Println("CuEVM Debug: CaptureTxEndSetAdditionalResults")
+	// fmt.Println("CuEVM Debug: bugsDetected", len(t.pendingBugs))
+	// fmt.Println("CuEVM Debug: pendingBugs", t.pendingBugs)
+	// fmt.Println("CuEVM Debug: transactionSucceeded", results.Receipt.Status)
+	// fmt.Println("CuEVM Debug: t.stateWritten", t.stateWritten)
+
+	// Report bugs only if transaction succeeded and state was written (matching GPU logic)
+	// GPU logic: if (no_bugs > 0 && (error_code == ERROR_SUCCESS || error_code == ERROR_RETURN))
+	transactionSucceeded := results.Receipt.Status == coretypes.ReceiptStatusSuccessful
+	bugsDetected := len(t.pendingBugs) > 0
+
+	if bugsDetected && transactionSucceeded && t.stateWritten {
+		// Store detected bugs for reporting (matching GPU finalize_coverage_bitmap logic)
+		results.AdditionalResults[coverageTracerResultsKeyEVMBugs] = t.pendingBugs
+		// fmt.Printf("CuEVM Debug: Reporting %d bugs (state_written: %t, tx_success: %t)\n",
+		//     len(t.pendingBugs), t.stateWritten, transactionSucceeded)
+	}
 	// fmt.Println("CuEVM Debug: CaptureTxEndSetAdditionalResults")
 	// fmt.Println("CuEVM Debug: lastCoverageId", t.lastCoverageId)
 	// fmt.Println("CuEVM Debug: lastMissedId", t.lastMissedId)

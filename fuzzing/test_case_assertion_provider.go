@@ -187,6 +187,11 @@ func (t *AssertionTestCaseProvider) callSequencePostCallTest(worker *FuzzerWorke
 	if err != nil {
 		return nil, err
 	}
+	// lastCall := callSequence[len(callSequence)-1]
+	// lastCallMethod, err := lastCall.Method()
+	// if err != nil {
+	// 	return nil, err
+	// }
 
 	// Obtain the test case for this method we're targeting for assertion testing.
 	t.testCasesLock.Lock()
@@ -227,6 +232,21 @@ func (t *AssertionTestCaseProvider) callSequencePostCallTest(worker *FuzzerWorke
 					if err != nil {
 						return err
 					}
+				}
+				bug_id := uint32(common.BytesToHash([]byte(string(*methodId))).Big().Uint64() & 0xFFFFFFFF)
+
+				myTestCase := &AssertionTestCase{
+					status:          TestCaseStatusFailed,
+					targetContract:  testCase.targetContract,
+					targetMethod:    testCase.targetMethod,
+					bugType:         CuEVM_ASSERTION_BUG_TYPE,
+					bugPC:           0,
+					bugContractName: testCase.targetContract.Name(),
+					callSequence:    &shrunkenCallSequence,
+					bugTime:         time.Since(t.fuzzer.fuzzStartTime).Seconds(), // seconds
+				}
+				if _, exists := t.generalBugs[bug_id]; !exists {
+					t.generalBugs[bug_id] = myTestCase
 				}
 
 				// Update our test state and report it finalized.
@@ -478,6 +498,55 @@ func (t *AssertionTestCaseProvider) GPUPostCallTest(workers []*FuzzerWorker, gpu
 	// }
 	// fmt.Println("CuEVM Debug: total_bugs_encountered", total_bugs_encountered)
 	return total_bugs_encountered > 0, nil
+}
+
+// GPUPostCallTest provides is a CallSequenceTestFunc that performs post-call testing logic for the attached Fuzzer
+// and any underlying FuzzerWorker. It is called after every call made in a call sequence. It checks whether invariants
+// in methods to test are upheld after each call the Fuzzer makes when testing a call sequence.
+func (t *AssertionTestCaseProvider) CPUPostCallTest(fullSequence calls.CallSequence, bug_id uint32, bigIntWeightValue *big.Int, contract_name string) (bool, error) {
+	t.testCasesLock.Lock()
+	defer t.testCasesLock.Unlock()
+	// workers[workerIdx].fuzzer.corpus.AddCallSequence(fullSequence, bigIntWeightValue)
+	lastCall := fullSequence[len(fullSequence)-1]
+	lastCallMethod, err := lastCall.Method()
+	if err != nil {
+		return false, err
+	}
+	// Extract rawPC, bugType, and bugContractId from bugId
+	rawPC := uint32(bug_id >> 16)
+	bugType := uint8((bug_id >> 8) & 0xFF)
+	// bugContractId := uint8(bug_id & 0xFF)
+	// general bugs including assertion failure, to be exported to json later
+	{
+
+		// fmt.Println("CuEVM Debug: bug_id", hex.EncodeToString(big.NewInt(int64(bug_id)).Bytes()))
+		if _, exists := t.generalBugs[bug_id]; exists {
+			return false, nil
+		}
+		// RegisterTestCase registers a new TestCase with the Fuzzer.
+		testCase := &AssertionTestCase{
+			status:          TestCaseStatusFailed,
+			targetContract:  lastCall.Contract,
+			targetMethod:    *lastCallMethod,
+			bugType:         uint32(bugType),
+			bugPC:           rawPC,
+			bugContractName: contract_name,
+			callSequence:    &fullSequence,
+			bugTime:         time.Since(t.fuzzer.fuzzStartTime).Seconds(), // seconds
+		}
+		// fmt.Println("CuEVM Debug: testCase", testCase)
+
+		// Add all bugs to general bugs first, false positive filtering happens later
+
+		t.generalBugs[bug_id] = testCase
+
+		_ = t.fuzzer.corpus.AddCallSequence(fullSequence, bigIntWeightValue)
+
+		// fmt.Println("CuEVM Debug: bug_id", bug_id, "testCase", testCase)
+		// fmt.Println("Time now, start time, elapsed", time.Now(), t.fuzzer.fuzzStartTime, time.Since(t.fuzzer.fuzzStartTime))
+		// os.Exit(1)
+	}
+	return true, nil
 }
 
 // getFalsePositivePCs gets false positive PCs for a contract's arithmetic bugs
