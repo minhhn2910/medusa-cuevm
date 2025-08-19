@@ -2174,7 +2174,6 @@ func (f *Fuzzer) launchCPUKernel() error {
 						} else {
 							dataMarkers = element.Call.DataMarkers
 						}
-
 						// Apply mutation
 						mutatedData, mutatedBlockNumber, mutatedBlockTimestamp, mutatedSenderIndex, mutatedValue :=
 							fuzzingutils.RestoreMutation(element.Call.Data, dataMarkers, gpuThreadIdx, elementIdx,
@@ -2195,7 +2194,7 @@ func (f *Fuzzer) launchCPUKernel() error {
 						mutatedSequence := make(calls.CallSequence, len(worker.callSequenceElements[sequenceIdx]))
 						for i := range worker.callSequenceElements[sequenceIdx] {
 							if worker.callSequenceElements[sequenceIdx][i] != nil {
-								mutatedSequence[i], _ = worker.callSequenceElements[sequenceIdx][i].Clone()
+								mutatedSequence[i], _ = worker.callSequenceElements[sequenceIdx][i].CloneWithZeroValue()
 							}
 						}
 

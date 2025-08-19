@@ -185,6 +185,26 @@ func (cse *CallSequenceElement) Clone() (*CallSequenceElement, error) {
 	return clone, nil
 }
 
+// Clone creates a copy of the underlying CallSequenceElement.
+func (cse *CallSequenceElement) CloneWithZeroValue() (*CallSequenceElement, error) {
+	// Clone our call
+	clonedCall, err := cse.Call.CloneWithZeroValue()
+	if err != nil {
+		return nil, err
+	}
+
+	// Clone the element
+	clone := &CallSequenceElement{
+		Contract:            cse.Contract,
+		Call:                clonedCall,
+		BlockNumberDelay:    cse.BlockNumberDelay,
+		BlockTimestampDelay: cse.BlockTimestampDelay,
+		ChainReference:      cse.ChainReference,
+		ExecutionTrace:      cse.ExecutionTrace,
+	}
+	return clone, nil
+}
+
 // Method obtains the abi.Method targeted by the CallSequenceElement.Call, or an error if one occurred while obtaining
 // it.
 func (cse *CallSequenceElement) Method() (*abi.Method, error) {

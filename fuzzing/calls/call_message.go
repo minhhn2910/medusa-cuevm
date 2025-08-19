@@ -273,6 +273,32 @@ func (m *CallMessage) Clone() (*CallMessage, error) {
 	return clone, nil
 }
 
+func (m *CallMessage) CloneWithZeroValue() (*CallMessage, error) {
+	// Clone our underlying ABI values data if we have any.
+	clonedAbiValues, err := m.DataAbiValues.Clone()
+	if err != nil {
+		return nil, err
+	}
+
+	// Create a message with the same data copied over.
+	clone := &CallMessage{
+		From:              m.From,
+		To:                m.To, // this value should be read-only, so we re-use it rather than cloning.
+		Nonce:             m.Nonce,
+		Value:             new(big.Int).Set(big.NewInt(0)),
+		GasLimit:          m.GasLimit,
+		GasPrice:          new(big.Int).Set(m.GasPrice),
+		GasFeeCap:         new(big.Int).Set(m.GasFeeCap),
+		GasTipCap:         new(big.Int).Set(m.GasTipCap),
+		Data:              slices.Clone(m.Data),
+		DataMarkers:       append([]DataMarker(nil), m.DataMarkers...),
+		DataAbiValues:     clonedAbiValues,
+		AccessList:        m.AccessList,
+		SkipAccountChecks: m.SkipAccountChecks,
+	}
+	return clone, nil
+}
+
 func (m *CallMessage) ToCoreMessage() *core.Message {
 	return &core.Message{
 		To:                m.To,

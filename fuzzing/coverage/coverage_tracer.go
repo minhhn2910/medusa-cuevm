@@ -38,6 +38,7 @@ func GetCoverageTracerResults(messageResults *types.MessageResults) *CoverageMap
 }
 
 const MAX_BUG_TRACING = 32
+const MAX_COVERAGE_TRACING = 128
 
 func GetCoverageTracerResultsEVMBugs(messageResults *types.MessageResults) []uint32 {
 	if genericResult, ok := messageResults.AdditionalResults[coverageTracerResultsKeyEVMBugs]; ok {
@@ -49,11 +50,11 @@ func GetCoverageTracerResultsEVMBugs(messageResults *types.MessageResults) []uin
 }
 
 // GetCoverageTracerResultsWithIds obtains coverage data with branch and storage IDs
-func GetCoverageTracerResultsWithIds(messageResults *types.MessageResults) (*CoverageMaps, uint32, uint32, uint8, []uint32) {
+func GetCoverageTracerResultsWithIds(messageResults *types.MessageResults) (*CoverageMaps, []uint32, []uint32, []uint8, []uint32) {
 	var coverageMaps *CoverageMaps
-	var lastCoverageId uint32
-	var lastMissedId uint32
-	var distanceBits uint8
+	var lastCoverageIds []uint32
+	var lastMissedIds []uint32
+	var distanceBits []uint8
 	var storageIds []uint32
 
 	// Get coverage maps
@@ -65,21 +66,21 @@ func GetCoverageTracerResultsWithIds(messageResults *types.MessageResults) (*Cov
 
 	// Get last coverage ID
 	if genericResult, ok := messageResults.AdditionalResults[coverageTracerResultsKeyLastId]; ok {
-		if castedResult, ok := genericResult.(uint32); ok {
-			lastCoverageId = castedResult
+		if castedResult, ok := genericResult.([]uint32); ok {
+			lastCoverageIds = castedResult
 		}
 	}
 
 	// Get last missed ID
 	if genericResult, ok := messageResults.AdditionalResults[coverageTracerResultsKeyMissedId]; ok {
-		if castedResult, ok := genericResult.(uint32); ok {
-			lastMissedId = castedResult
+		if castedResult, ok := genericResult.([]uint32); ok {
+			lastMissedIds = castedResult
 		}
 	}
 
 	// Get distance bits
 	if genericResult, ok := messageResults.AdditionalResults[coverageTracerResultsKeyDistanceBits]; ok {
-		if castedResult, ok := genericResult.(uint8); ok {
+		if castedResult, ok := genericResult.([]uint8); ok {
 			distanceBits = castedResult
 		}
 	}
@@ -91,7 +92,7 @@ func GetCoverageTracerResultsWithIds(messageResults *types.MessageResults) (*Cov
 		}
 	}
 
-	return coverageMaps, lastCoverageId, lastMissedId, distanceBits, storageIds
+	return coverageMaps, lastCoverageIds, lastMissedIds, distanceBits, storageIds
 }
 
 // RemoveCoverageTracerResults removes CoverageMaps stored by a CoverageTracer from message results.
@@ -178,9 +179,9 @@ type CoverageTracer struct {
 	nativeTracer *chain.TestChainTracer
 
 	// Coverage tracking features (matching GPU implementation)
-	lastCoverageId   uint32
-	lastMissedId     uint32
-	lastDistanceBits uint8
+	lastCoverageIds  []uint32
+	lastMissedIds    []uint32
+	lastDistanceBits []uint8
 	storageIds       []uint32
 	distanceTracker  *DistanceTracker
 
@@ -258,9 +259,9 @@ func (t *CoverageTracer) OnTxStart(vm *tracing.VMContext, tx *coretypes.Transact
 	t.evmContext = vm
 
 	// Reset coverage tracking fields
-	t.lastCoverageId = 0
-	t.lastMissedId = 0
-	t.lastDistanceBits = 0
+	t.lastCoverageIds = make([]uint32, 0)
+	t.lastMissedIds = make([]uint32, 0)
+	t.lastDistanceBits = make([]uint8, 0)
 	t.storageIds = make([]uint32, 0)
 	t.distanceTracker = NewDistanceTracker()
 
@@ -452,6 +453,8 @@ func (t *CoverageTracer) OnOpcode(pc uint64, op byte, gas, cost uint64, scope tr
 	// We track when we arrive at a destination after a JUMPI (justJumped == true)
 	if wasJumpi {
 		// fmt.Printf("CuEVM Debug: Branch detected - lastPC: %d, currentPC: %d, justJumped: %t\n", lastPC, pc, justJumped)
+		// in GPUs multiple threads will have a chance to record different early branch and not the last one, result in more instance in the corpus
+		// we record the full list of branches, not one last id
 
 		// Convert address to uint32 account_id (using last 4 bytes)
 		account_id := uint32(0)
@@ -468,7 +471,9 @@ func (t *CoverageTracer) OnOpcode(pc uint64, op byte, gas, cost uint64, scope tr
 		// Calculate covered branch hash (AFL-style: (pc_src << 1) ^ pc_dst ^ account_id)
 		afl_hash_covered := (pc_src << 1) ^ pc_dst ^ account_id
 		afl_hash_covered = afl_hash_covered % HASHMAP_SIZE
-		t.lastCoverageId = afl_hash_covered + 1 // +1 to avoid 0
+		if len(t.lastCoverageIds) < MAX_COVERAGE_TRACING {
+			t.lastCoverageIds = append(t.lastCoverageIds, afl_hash_covered+1) // +1 to avoid 0
+		}
 
 		// fmt.Printf("CuEVM Debug: Coverage ID calculated: %d (pc_src: %d, pc_dst: %d, account_id: 0x%x)\n",
 		// 	t.lastCoverageId, pc_src, pc_dst, account_id)
@@ -477,6 +482,9 @@ func (t *CoverageTracer) OnOpcode(pc uint64, op byte, gas, cost uint64, scope tr
 		// This is a simplified approach - in practice, you'd need static analysis
 		// For now, we'll track potential missed branches with distance
 		distanceBits := t.distanceTracker.GetDistanceBits()
+		if len(t.lastDistanceBits) < MAX_COVERAGE_TRACING {
+			t.lastDistanceBits = append(t.lastDistanceBits, distanceBits)
+		}
 		// fmt.Printf("CuEVM Debug: Distance bits: %d\n", distanceBits)
 
 		if distanceBits > 0 {
@@ -484,8 +492,13 @@ func (t *CoverageTracer) OnOpcode(pc uint64, op byte, gas, cost uint64, scope tr
 			pc_missed := pc_dst ^ 1 // Simple approach: flip lowest bit
 			afl_hash_missed := (pc_src << 1) ^ pc_missed ^ account_id
 			afl_hash_missed = afl_hash_missed % HASHMAP_SIZE
-			t.lastMissedId = afl_hash_missed + 1 // +1 to avoid 0
-			t.lastDistanceBits = distanceBits
+			lastMissedId := afl_hash_missed + 1 // +1 to avoid 0
+			if len(t.lastMissedIds) < MAX_COVERAGE_TRACING {
+				t.lastMissedIds = append(t.lastMissedIds, lastMissedId)
+			}
+			if len(t.lastDistanceBits) < MAX_COVERAGE_TRACING {
+				t.lastDistanceBits = append(t.lastDistanceBits, distanceBits)
+			}
 
 			// fmt.Printf("CuEVM Debug: Missed ID calculated: %d (pc_missed: %d, distance_bits: %d)\n",
 			// 	t.lastMissedId, pc_missed, distanceBits)
@@ -593,8 +606,8 @@ func (t *CoverageTracer) CaptureTxEndSetAdditionalResults(results *types.Message
 	results.AdditionalResults[coverageTracerResultsKey] = t.coverageMaps
 
 	// Store coverage tracking results
-	results.AdditionalResults[coverageTracerResultsKeyLastId] = t.lastCoverageId
-	results.AdditionalResults[coverageTracerResultsKeyMissedId] = t.lastMissedId
+	results.AdditionalResults[coverageTracerResultsKeyLastId] = t.lastCoverageIds
+	results.AdditionalResults[coverageTracerResultsKeyMissedId] = t.lastMissedIds
 	results.AdditionalResults[coverageTracerResultsKeyDistanceBits] = t.lastDistanceBits
 	results.AdditionalResults[coverageTracerResultsKeyStorageIds] = t.storageIds
 	// fmt.Println("CuEVM Debug: CaptureTxEndSetAdditionalResults")

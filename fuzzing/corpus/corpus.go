@@ -581,7 +581,7 @@ func (c *Corpus) CheckSequenceCoverageAndUpdateWithIds(callSequence calls.CallSe
 	lastCallChainReference := lastCall.ChainReference
 	lastMessageResult := lastCallChainReference.Block.MessageResults[lastCallChainReference.TransactionIndex]
 
-	lastMessageCoverageMaps, lastCoverageId, lastMissedId, distanceBits, storageIds := coverage.GetCoverageTracerResultsWithIds(lastMessageResult)
+	lastMessageCoverageMaps, lastCoverageIds, lastMissedIds, allDistanceBits, storageIds := coverage.GetCoverageTracerResultsWithIds(lastMessageResult)
 
 	// If we have none, because a coverage tracer wasn't attached when processing this call, we can stop.
 	if lastMessageCoverageMaps == nil {
@@ -595,30 +595,35 @@ func (c *Corpus) CheckSequenceCoverageAndUpdateWithIds(callSequence calls.CallSe
 	}
 
 	shouldAddSequence := false
-	var coverageIdToUse *uint32
+	var coverageIdToUse []*uint32 // add multiple coverage ids
 
 	// Lock only the tracking maps with separate mutex
 	c.trackingMapsLock.Lock()
 
-	// 1. Check covered branch ID - add if new
-	if lastCoverageId > 0 && !c.coveredIds[lastCoverageId] {
-		c.coveredIds[lastCoverageId] = true
-		shouldAddSequence = true
-		coverageIdToUse = &lastCoverageId
-		fmt.Printf("New covered branch ID: %d\n", lastCoverageId)
+	for _, lastCoverageId := range lastCoverageIds {
+		// 1. Check covered branch ID - add if new
+		if lastCoverageId > 0 && !c.coveredIds[lastCoverageId] {
+			c.coveredIds[lastCoverageId] = true
+			shouldAddSequence = true
+			coverageIdToUse = append(coverageIdToUse, &lastCoverageId)
+			fmt.Printf("New covered branch ID: %d\n", lastCoverageId)
+		}
 	}
 
 	// 2. Check missed branch ID - add if new or distance improved
-	if lastMissedId > 0 && distanceBits >= 0 {
-		existingDistance, exists := c.missedIdToDist[lastMissedId]
-		if !exists || distanceBits < existingDistance {
-			c.missedIdToDist[lastMissedId] = distanceBits
-			shouldAddSequence = true
-			coverageIdToUse = &lastMissedId
-			if exists {
-				fmt.Printf("Improved missed branch ID: %d (distance: %d -> %d)\n", lastMissedId, existingDistance, distanceBits)
-			} else {
-				fmt.Printf("New missed branch ID: %d (distance: %d)\n", lastMissedId, distanceBits)
+	for idx, lastMissedId := range lastMissedIds {
+		distanceBits := allDistanceBits[idx]
+		if lastMissedId > 0 && distanceBits >= 0 {
+			existingDistance, exists := c.missedIdToDist[lastMissedId]
+			if !exists || distanceBits < existingDistance {
+				c.missedIdToDist[lastMissedId] = distanceBits
+				shouldAddSequence = true
+				coverageIdToUse = append(coverageIdToUse, &lastMissedId)
+				if exists {
+					fmt.Printf("Improved missed branch ID: %d (distance: %d -> %d)\n", lastMissedId, existingDistance, distanceBits)
+				} else {
+					fmt.Printf("New missed branch ID: %d (distance: %d)\n", lastMissedId, distanceBits)
+				}
 			}
 		}
 	}
@@ -628,7 +633,7 @@ func (c *Corpus) CheckSequenceCoverageAndUpdateWithIds(callSequence calls.CallSe
 		if !c.storageIds[storageId] {
 			c.storageIds[storageId] = true
 			shouldAddSequence = true
-			coverageIdToUse = &storageId
+			coverageIdToUse = append(coverageIdToUse, &storageId)
 			fmt.Printf("New storage ID: %d\n", storageId)
 			break // Only need one new storage ID to trigger addition
 		}
@@ -646,7 +651,9 @@ func (c *Corpus) CheckSequenceCoverageAndUpdateWithIds(callSequence calls.CallSe
 	// Add sequence if any condition was met
 	if shouldAddSequence {
 		if coverageIdToUse != nil {
-			err = c.addCallSequenceWithCoverageId(c.callSequenceFiles, callSequence, true, mutationChooserWeight, flushImmediately, coverageIdToUse)
+			for _, coverageId := range coverageIdToUse {
+				err = c.addCallSequenceWithCoverageId(c.callSequenceFiles, callSequence, true, mutationChooserWeight, flushImmediately, coverageId)
+			}
 		} else {
 			err = c.addCallSequence(c.callSequenceFiles, callSequence, true, mutationChooserWeight, flushImmediately)
 		}
