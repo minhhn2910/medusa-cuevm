@@ -86,6 +86,9 @@ type FuzzingConfig struct {
 	// configuration
 	ConstructorArgs map[string]map[string]any `json:"constructorArgs"`
 
+	// This is tried before ConstructorArgs
+	ConstructorArgsBytes string `json:"constructorArgsBytes"`
+
 	// DeployerAddress describe the account address to be used to deploy contracts.
 	DeployerAddress string `json:"deployerAddress"`
 

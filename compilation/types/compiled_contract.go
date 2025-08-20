@@ -2,6 +2,7 @@ package types
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -128,5 +129,24 @@ func (c *CompiledContract) GetDeploymentMessageData(args []any) ([]byte, error) 
 		}
 		initBytecodeWithArgs = append(initBytecodeWithArgs, data...)
 	}
+	return initBytecodeWithArgs, nil
+}
+
+// GetDeploymentMessageDataWithBytes is a helper method used to create contract deployment message data using raw bytes
+// for constructor arguments. The argsBytes should contain the ABI-encoded constructor arguments.
+func (c *CompiledContract) GetDeploymentMessageDataWithBytes(argsBytes string) ([]byte, error) {
+	// Handle 0x prefix
+	argsBytes = strings.TrimPrefix(argsBytes, "0x")
+
+	// Decode hex string to bytes
+	argsBytesDecoded, err := hex.DecodeString(argsBytes)
+	if err != nil {
+		return nil, fmt.Errorf("could not decode constructor arguments bytes: %v", err)
+	}
+
+	// Append the decoded bytes to the init bytecode
+	initBytecodeWithArgs := slices.Clone(c.InitBytecode)
+	initBytecodeWithArgs = append(initBytecodeWithArgs, argsBytesDecoded...)
+
 	return initBytecodeWithArgs, nil
 }

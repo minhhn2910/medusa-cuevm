@@ -2,6 +2,7 @@ package fuzzing
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
@@ -109,6 +110,8 @@ type Fuzzer struct {
 	// It takes a decent amount of time to calculate, so we only log once a minute,
 	// and only when debug logging is enabled.
 	lastPCsLogMsg time.Time
+
+	PCsLogs []int
 }
 
 // Amount of time between "total PCs hit" log messages. This message is only output when debug logging is enabled.
@@ -323,12 +326,16 @@ func (f *Fuzzer) AddCompilationTargets(compilations []compilationTypes.Compilati
 	// No need to handle the error here since having compilation artifacts implies that we used a supported
 	// platform configuration
 	platformConfig, _ := f.config.Compilation.GetPlatformConfig()
-
+	fmt.Printf("CuEVM Debug: platformConfig: %s\n", platformConfig)
 	// Retrieve the compilation target for slither
 	target := platformConfig.GetTarget()
+	isEtherScan := strings.HasPrefix(target, "CUEVM_ETHERSCAN_TARGET")
+	if isEtherScan {
+		target = strings.TrimPrefix(target, "CUEVM_ETHERSCAN_TARGET")
+	}
 
 	// Run slither and handle errors
-	slitherResults, err := f.config.Slither.RunSlither(target)
+	slitherResults, err := f.config.Slither.RunSlither(target, isEtherScan)
 	if err != nil || slitherResults == nil {
 		if err != nil {
 			f.logger.Warn("Failed to run slither", err)
@@ -501,32 +508,41 @@ func chainSetupFromCompilations(fuzzer *Fuzzer, testChain *chain.TestChain) (*ex
 			// If we found a contract definition that matches this definition by name, try to deploy it
 			if contract.Name() == contractName {
 				testChain.CompiledContracts[contractName] = contract.CompiledContract()
-				// Concatenate constructor arguments, if necessary
-				args := make([]any, 0)
-				if len(contract.CompiledContract().Abi.Constructor.Inputs) > 0 {
-					// If the contract is a predeployed contract, throw an error because they do not accept constructor
-					// args.
-					if _, ok := fuzzer.config.Fuzzing.PredeployedContracts[contractName]; ok {
-						return nil, fmt.Errorf("predeployed contracts cannot accept constructor arguments")
-					}
-					jsonArgs, ok := fuzzer.config.Fuzzing.ConstructorArgs[contractName]
-					if !ok {
-						return nil, fmt.Errorf("constructor arguments for contract %s not provided", contractName)
-					}
-					decoded, err := valuegeneration.DecodeJSONArgumentsFromMap(contract.CompiledContract().Abi.Constructor.Inputs,
-						jsonArgs, deployedContractAddr)
+				var msgData []byte
+				var err error
+				if fuzzer.config.Fuzzing.ConstructorArgsBytes != "" && len(contract.CompiledContract().Abi.Constructor.Inputs) > 0 {
+					msgData, err = contract.CompiledContract().GetDeploymentMessageDataWithBytes(fuzzer.config.Fuzzing.ConstructorArgsBytes)
 					if err != nil {
-						return nil, err
+						return nil, fmt.Errorf("initial contract deployment failed for contract \"%v\" using constructorArgsBytes, error: %v", contractName, err)
 					}
-					args = decoded
-				}
+				} else {
+					// Concatenate constructor arguments, if necessary
+					args := make([]any, 0)
+					if len(contract.CompiledContract().Abi.Constructor.Inputs) > 0 {
+						// If the contract is a predeployed contract, throw an error because they do not accept constructor
+						// args.
+						if _, ok := fuzzer.config.Fuzzing.PredeployedContracts[contractName]; ok {
+							return nil, fmt.Errorf("predeployed contracts cannot accept constructor arguments")
+						}
+						jsonArgs, ok := fuzzer.config.Fuzzing.ConstructorArgs[contractName]
+						if !ok {
+							return nil, fmt.Errorf("constructor arguments for contract %s not provided", contractName)
+						}
+						decoded, err := valuegeneration.DecodeJSONArgumentsFromMap(contract.CompiledContract().Abi.Constructor.Inputs,
+							jsonArgs, deployedContractAddr)
+						if err != nil {
+							return nil, err
+						}
+						args = decoded
+					}
 
-				// Construct our deployment message/tx data field
-				msgData, err := contract.CompiledContract().GetDeploymentMessageData(args)
-				if err != nil {
-					return nil, fmt.Errorf("initial contract deployment failed for contract \"%v\", error: %v", contractName, err)
-				}
+					// Construct our deployment message/tx data field
+					msgData, err = contract.CompiledContract().GetDeploymentMessageData(args)
+					if err != nil {
+						return nil, fmt.Errorf("initial contract deployment failed for contract \"%v\", error: %v", contractName, err)
+					}
 
+				}
 				// If our project config has a non-zero balance for this target contract, retrieve it
 				contractBalance := big.NewInt(0)
 				if len(balances) > i {
@@ -825,24 +841,32 @@ func (f *Fuzzer) Start() error {
 		} else {
 			f.logger.Error("Failed to initialize the test chain", err)
 		}
-		fmt.Println("Retry with chain fork")
-		f.config.Fuzzing.TestChainConfig.ForkConfig.ForkModeEnabled = true
-		f.config.Fuzzing.TestChainConfig.ForkConfig.RpcUrl = "https://eth.llamarpc.com"
-		f.config.Fuzzing.TestChainConfig.ForkConfig.RpcBlock = 22816200
-		f.config.Fuzzing.TestChainConfig.ForkConfig.PoolSize = 20
-		baseTestChain, err = f.createTestChain()
-		trace, err = f.Hooks.ChainSetupFunc(f, baseTestChain)
-		if err != nil {
-			if trace != nil {
-				f.logger.Error("Failed to initialize the test chain", err, errors.New(trace.Log().ColorString()))
-			}
-			f.logger.Error("Failed to initialize the test chain with fork", err)
-			return err
-		}
-		f.logger.Info("Finished setting up test chain with fork")
-
-		// return err
+		return err
 	}
+	// if err != nil {
+	// 	if trace != nil {
+	// 		f.logger.Error("Failed to initialize the test chain", err, errors.New(trace.Log().ColorString()))
+	// 	} else {
+	// 		f.logger.Error("Failed to initialize the test chain", err)
+	// 	}
+	// 	// fmt.Println("Retry with chain fork")
+	// 	// f.config.Fuzzing.TestChainConfig.ForkConfig.ForkModeEnabled = true
+	// 	// f.config.Fuzzing.TestChainConfig.ForkConfig.RpcUrl = "https://eth.llamarpc.com"
+	// 	// f.config.Fuzzing.TestChainConfig.ForkConfig.RpcBlock = 22816200
+	// 	// f.config.Fuzzing.TestChainConfig.ForkConfig.PoolSize = 20
+	// 	// baseTestChain, err = f.createTestChain()
+	// 	// trace, err = f.Hooks.ChainSetupFunc(f, baseTestChain)
+	// 	// if err != nil {
+	// 	// 	if trace != nil {
+	// 	// 		f.logger.Error("Failed to initialize the test chain", err, errors.New(trace.Log().ColorString()))
+	// 	// 	}
+	// 	// 	f.logger.Error("Failed to initialize the test chain with fork", err)
+	// 	// 	return err
+	// 	// }
+	// 	// f.logger.Info("Finished setting up test chain with fork")
+
+	// 	// return err
+	// }
 	f.logger.Info("Finished setting up test chain")
 
 	// Initialize our coverage maps by measuring the coverage we get from the corpus.
@@ -932,7 +956,8 @@ func (f *Fuzzer) Start() error {
 		uniquePCs = 0
 	}
 	fmt.Println("MEDUSA_UNIQUE_PC_COUNT:", uniquePCs)
-
+	fmt.Println("MEDUSA_TOTAL_TRANSACTIONS:", f.metrics.SequencesTested().Uint64()*uint64(f.config.Fuzzing.CallSequenceLength))
+	fmt.Println("MEDUSA_PCS_LOGS:", f.PCsLogs)
 	// Finally, generate our coverage report if we have set a valid corpus directory.
 	if err == nil && len(f.config.Fuzzing.CoverageFormats) > 0 {
 		// Write to the default directory if we have no corpus directory set.
@@ -959,6 +984,17 @@ func (f *Fuzzer) Start() error {
 					f.logger.Error(fmt.Sprintf("Failed to generate %s coverage report", reportType), err)
 				} else {
 					f.logger.Info(fmt.Sprintf("%s report(s) saved to: %s", reportType, path), colors.Bold, colors.Reset)
+				}
+			}
+			// Get all sequences from the corpus
+			allSequences := f.corpus.ExtractAllSequences()
+
+			// Write corpus sequences to JSON file
+			corpusPath := filepath.Join(coverageReportDir, "corpus.json")
+			corpusData, jsonErr := json.Marshal(allSequences)
+			if jsonErr == nil {
+				if writeErr := os.WriteFile(corpusPath, corpusData, 0644); writeErr == nil {
+					f.logger.Info("Corpus sequences saved to: ", colors.Bold, corpusPath, colors.Reset)
 				}
 			}
 		}
@@ -1043,18 +1079,22 @@ func (f *Fuzzer) printMetricsLoop() {
 			logBuffer.Append(", shrinking: ", colors.Bold, fmt.Sprintf("%v", workersShrinking), colors.Reset)
 			logBuffer.Append(", mem: ", colors.Bold, fmt.Sprintf("%v/%v MB", memoryUsedMB, memoryTotalMB), colors.Reset)
 			logBuffer.Append(", resets/s: ", colors.Bold, fmt.Sprintf("%d", uint64(float64(new(big.Int).Sub(workerStartupCount, lastWorkerStartupCount).Uint64())/secondsSinceLastUpdate)), colors.Reset)
-
-			if time.Since(f.lastPCsLogMsg) >= timeBetweenPCsLogMsgs {
-				start := time.Now()
-				totalPCs, err := coverage.GetUniquePCsCount(f.compilations, f.corpus.CoverageMaps(), f.logger, f.config.Fuzzing.DeploymentCodeCoverageEnabled)
-				// This is just for a log message. This shouldn't error but if it does we don't need to exit out
-				if err == nil {
-					end := time.Now()
-					f.lastPCsLogMsg = end
-					logBuffer.Append(", total PCs hit: ", colors.Bold, fmt.Sprintf("%v", totalPCs), colors.Reset)
-					logBuffer.Append(", time to calculate total PCs hit: ", colors.Bold, fmt.Sprintf("%v", end.Sub(start)), colors.Reset)
-				}
+		}
+		//CuEVM experiment: always print unique PC count for printing to the console
+		{
+			// if time.Since(f.lastPCsLogMsg) >= timeBetweenPCsLogMsgs {
+			start := time.Now()
+			totalPCs, err := coverage.GetUniquePCsCount(f.compilations, f.corpus.CoverageMaps(), f.logger, f.config.Fuzzing.DeploymentCodeCoverageEnabled)
+			fmt.Println("CuEVM Debug: totalPCs", totalPCs)
+			f.PCsLogs = append(f.PCsLogs, totalPCs)
+			// This is just for a log message. This shouldn't error but if it does we don't need to exit out
+			if err == nil {
+				end := time.Now()
+				f.lastPCsLogMsg = end
+				logBuffer.Append(", total PCs hit: ", colors.Bold, fmt.Sprintf("%v", totalPCs), colors.Reset)
+				logBuffer.Append(", time to calculate total PCs hit: ", colors.Bold, fmt.Sprintf("%v", end.Sub(start)), colors.Reset)
 			}
+			// }
 		}
 		f.logger.Info(logBuffer.Elements()...)
 
@@ -1075,7 +1115,7 @@ func (f *Fuzzer) printMetricsLoop() {
 		}
 
 		// Sleep some time between print iterations
-		time.Sleep(time.Second * 3)
+		time.Sleep(time.Second * 1)
 	}
 }
 
