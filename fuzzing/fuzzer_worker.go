@@ -142,7 +142,7 @@ func newFuzzerWorker(fuzzer *Fuzzer, workerIndex int, randomProvider *rand.Rand)
 	worker.shrinkingValueMutator = shrinkingValueMutator
 
 	worker.shrinkRequestChan = make(chan ShrinkCallSequenceRequest, 32)
-	worker.addSequenceCorpusChan = make(chan AddSequenceCorpusRequest, 100)
+	worker.addSequenceCorpusChan = make(chan AddSequenceCorpusRequest, 512)
 	worker.shrinkWg.Add(1)
 	go worker.addCallSequenceCorpusLoop()
 	return worker, nil
