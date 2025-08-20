@@ -1378,6 +1378,16 @@ func (f *Fuzzer) seedCorpus() {
 
 				sequence := calls.CallSequence{element, element1}
 
+				if selectedMethod.Method.Sig == "CuEVM::fallback()" {
+					element2, _ := element.Clone()
+					element2.Call.Data = make([]byte, 0) // blank data, no value
+
+					element3, _ := element1.Clone()
+					element3.Call.Data = make([]byte, 0) // blank data, no value
+
+					sequence = calls.CallSequence{element, element1, element2, element3}
+					fmt.Println("\n\nCuEVM Debug: fallback sequence\n\n")
+				}
 				executionCheckFunc := func(seq calls.CallSequence) (bool, error) {
 					return false, f.corpus.CheckSequenceCoverageAndUpdate(seq, worker.getNewCorpusCallSequenceWeight(), true)
 				}
@@ -1388,6 +1398,7 @@ func (f *Fuzzer) seedCorpus() {
 				if worker.chain.RevertToBlockIndex(worker.testingBaseBlockIndex) != nil {
 					continue
 				}
+
 			}
 		}(i, startIdx, endIdx)
 	}
@@ -1525,7 +1536,7 @@ func (f *Fuzzer) prepareWorkersDataInParallel() (bool, error) {
 
 				isNewSequence, err := worker.sequenceGenerator.InitializeNextSequence(f.loopCounter)
 				if err != nil {
-					fmt.Println("CuEVM Debug: InitializeNextSequence error, use blank sequence", err)
+					// fmt.Println("CuEVM Debug: InitializeNextSequence error, use blank sequence")
 					err = nil
 					// errChan <- err
 					// return
