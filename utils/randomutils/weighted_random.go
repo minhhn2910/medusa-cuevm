@@ -58,6 +58,16 @@ func NewWeightedRandomChooserWithRand[T any](randomProvider *rand.Rand, randomPr
 	}
 }
 
+// CuEVM debug: add a function to print the choices
+func (c *WeightedRandomChooser[T]) PrintChoices() {
+	fmt.Println("Printing WeightedRandomChooser choices:")
+	for _, choice := range c.choices {
+		fmt.Printf("choice data: %v\n", choice.Data)
+		fmt.Printf("choice weight: %v\n", choice.weight)
+		fmt.Println()
+	}
+}
+
 // ChoiceCount returns the count of choices added to this provider.
 func (c *WeightedRandomChooser[T]) ChoiceCount() int {
 	return len(c.choices)

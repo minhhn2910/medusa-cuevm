@@ -80,7 +80,7 @@ func (s *SlitherConfig) getArgs(target string) ([]string, error) {
 
 // RunSlither on the provided compilation target. RunSlither will use cached results if they exist and write to the
 // cache if we have not written to the cache already. A SlitherResults data structure is returned.
-func (s *SlitherConfig) RunSlither(target string) (*SlitherResults, error) {
+func (s *SlitherConfig) RunSlither(target string, isEtherScan bool) (*SlitherResults, error) {
 	// Return early if we do not want to run slither
 	if !s.UseSlither {
 		return nil, nil
@@ -118,7 +118,9 @@ func (s *SlitherConfig) RunSlither(target string) (*SlitherResults, error) {
 		if err != nil {
 			return nil, err
 		}
-
+		if isEtherScan {
+			args = append(args, "--compile-force-framework", "etherscan", "--etherscan-json-file", target)
+		}
 		// Log the command
 		cmd := exec.Command("slither", args...)
 		logging.GlobalLogger.Info("Running Slither:\n", cmd.String())

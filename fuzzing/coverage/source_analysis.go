@@ -182,7 +182,7 @@ type SourceLineAnalysis struct {
 }
 
 // GetUniquePCsCount returns the number of PCs in all contracts hit by our tests.
-func GetUniquePCsCount(compilations []types.Compilation, coverageMaps *CoverageMaps, logger *logging.Logger) (int, error) {
+func GetUniquePCsCount(compilations []types.Compilation, coverageMaps *CoverageMaps, logger *logging.Logger, deploymentCodeCoverageEnabled bool) (int, error) {
 	uniquePCs := 0
 
 	// Loop through all sources in all compilations to process coverage information.
@@ -195,17 +195,22 @@ func GetUniquePCsCount(compilations []types.Compilation, coverageMaps *CoverageM
 					continue
 				}
 				// Obtain coverage map data for this contract.
-				initCoverageMapData, err := coverageMaps.GetContractCoverageMap(contract.InitBytecode, true)
-				if err != nil {
-					return 0, fmt.Errorf("could not perform source code analysis due to error fetching init coverage map data: %v", err)
+				if deploymentCodeCoverageEnabled {
+					initCoverageMapData, err := coverageMaps.GetContractCoverageMap(contract.InitBytecode, true)
+					if err != nil {
+						return 0, fmt.Errorf("could not perform source code analysis due to error fetching init coverage map data: %v", err)
+					}
+					coverageMaps.updateLock.Lock()
+					uniquePCs += getContractPCsHit(contract.InitBytecode, initCoverageMapData, logger)
+					coverageMaps.updateLock.Unlock()
 				}
+
 				runtimeCoverageMapData, err := coverageMaps.GetContractCoverageMap(contract.RuntimeBytecode, false)
 				if err != nil {
 					return 0, fmt.Errorf("could not perform source code analysis due to error fetching runtime coverage map data: %v", err)
 				}
 
 				coverageMaps.updateLock.Lock()
-				uniquePCs += getContractPCsHit(contract.InitBytecode, initCoverageMapData, logger)
 				uniquePCs += getContractPCsHit(contract.RuntimeBytecode, runtimeCoverageMapData, logger)
 				coverageMaps.updateLock.Unlock()
 			}
