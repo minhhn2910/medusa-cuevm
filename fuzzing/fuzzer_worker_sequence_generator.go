@@ -637,7 +637,8 @@ func (g *CallSequenceGenerator) generateNewElementWithChosenMethod(selectedMetho
 	var value *big.Int
 	value = big.NewInt(0)
 	if selectedMethod.Method.StateMutability == "payable" || forceValue {
-		value = g.config.ValueGenerator.GenerateInteger(false, 64)
+		// fmt.Println("CuEVM Debug: generate payable value, forceValue", forceValue)
+		value = big.NewInt(1234)
 	}
 	var zero *big.Int = big.NewInt(0)
 	// Create our message using the provided parameters.

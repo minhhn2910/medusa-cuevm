@@ -546,7 +546,7 @@ func (c *Corpus) CheckSequenceCoverageAndUpdate(callSequence calls.CallSequence,
 
 	// If we had an increase in coverage, we save the sequence.
 	if coverageUpdated {
-		// fmt.Println("\nMedusa: coverage updated\n")
+		fmt.Println("\nMedusa: coverage updated\n")
 		// fmt.Println("Medusa: coverage after update")
 		// fmt.Println(c.coverageMaps.DebugString())
 		// If we achieved new coverage, save this sequence for mutation purposes.
