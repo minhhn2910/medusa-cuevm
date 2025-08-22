@@ -2930,7 +2930,7 @@ func (f *Fuzzer) printMetricsLoop() {
 		}
 
 		// Sleep some time between print iterations
-		time.Sleep(time.Second * 2)
+		time.Sleep(time.Second * 1)
 	}
 }
 
