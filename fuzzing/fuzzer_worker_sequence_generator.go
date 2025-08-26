@@ -637,13 +637,13 @@ func (g *CallSequenceGenerator) generateNewElementWithChosenMethod(selectedMetho
 	var value *big.Int
 	value = big.NewInt(0)
 	if selectedMethod.Method.StateMutability == "payable" || forceValue {
-		value = g.config.ValueGenerator.GenerateInteger(false, 64)
+		value = big.NewInt(1234) // g.config.ValueGenerator.GenerateInteger(false, 64)
 	}
-
+	var zero *big.Int = big.NewInt(0)
 	// Create our message using the provided parameters.
 	// We fill out some fields and populate the rest from our TestChain properties.
 	// TODO: We likely want to make gasPrice fluctuate within some sensible range here.
-	msg := calls.NewCallMessageWithAbiValueData(selectedSender, &selectedMethod.Address, 0, value, g.worker.fuzzer.config.Fuzzing.TransactionGasLimit, nil, nil, nil, &calls.CallMessageDataAbiValues{
+	msg := calls.NewCallMessageWithAbiValueData(selectedSender, &selectedMethod.Address, 0, value, g.worker.fuzzer.config.Fuzzing.TransactionGasLimit, zero, zero, zero, &calls.CallMessageDataAbiValues{
 		Method:      &selectedMethod.Method,
 		InputValues: args,
 	})

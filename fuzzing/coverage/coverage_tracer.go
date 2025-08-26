@@ -179,9 +179,9 @@ type CoverageTracer struct {
 	nativeTracer *chain.TestChainTracer
 
 	// Coverage tracking features (matching GPU implementation)
-	lastCoverageIds  []uint32
-	lastMissedIds    []uint32
-	lastDistanceBits []uint8
+	lastCoverageId   uint32
+	lastMissedId     uint32
+	lastDistanceBits uint32
 	storageIds       []uint32
 	distanceTracker  *DistanceTracker
 
@@ -259,9 +259,9 @@ func (t *CoverageTracer) OnTxStart(vm *tracing.VMContext, tx *coretypes.Transact
 	t.evmContext = vm
 
 	// Reset coverage tracking fields
-	t.lastCoverageIds = make([]uint32, 0)
-	t.lastMissedIds = make([]uint32, 0)
-	t.lastDistanceBits = make([]uint8, 0)
+	t.lastCoverageId = 0
+	t.lastMissedId = 0
+	t.lastDistanceBits = 256 // high value for comparison
 	t.storageIds = make([]uint32, 0)
 	t.distanceTracker = NewDistanceTracker()
 
@@ -471,9 +471,7 @@ func (t *CoverageTracer) OnOpcode(pc uint64, op byte, gas, cost uint64, scope tr
 		// Calculate covered branch hash (AFL-style: (pc_src << 1) ^ pc_dst ^ account_id)
 		afl_hash_covered := (pc_src << 1) ^ pc_dst ^ account_id
 		afl_hash_covered = afl_hash_covered % HASHMAP_SIZE
-		if len(t.lastCoverageIds) < MAX_COVERAGE_TRACING {
-			t.lastCoverageIds = append(t.lastCoverageIds, afl_hash_covered+1) // +1 to avoid 0
-		}
+		t.lastCoverageId = afl_hash_covered + 1 // +1 to avoid 0
 
 		// fmt.Printf("CuEVM Debug: Coverage ID calculated: %d (pc_src: %d, pc_dst: %d, account_id: 0x%x)\n",
 		// 	t.lastCoverageId, pc_src, pc_dst, account_id)
@@ -482,9 +480,7 @@ func (t *CoverageTracer) OnOpcode(pc uint64, op byte, gas, cost uint64, scope tr
 		// This is a simplified approach - in practice, you'd need static analysis
 		// For now, we'll track potential missed branches with distance
 		distanceBits := t.distanceTracker.GetDistanceBits()
-		if len(t.lastDistanceBits) < MAX_COVERAGE_TRACING {
-			t.lastDistanceBits = append(t.lastDistanceBits, distanceBits)
-		}
+		t.lastDistanceBits = uint32(distanceBits)
 		// fmt.Printf("CuEVM Debug: Distance bits: %d\n", distanceBits)
 
 		if distanceBits > 0 {
@@ -493,12 +489,10 @@ func (t *CoverageTracer) OnOpcode(pc uint64, op byte, gas, cost uint64, scope tr
 			afl_hash_missed := (pc_src << 1) ^ pc_missed ^ account_id
 			afl_hash_missed = afl_hash_missed % HASHMAP_SIZE
 			lastMissedId := afl_hash_missed + 1 // +1 to avoid 0
-			if len(t.lastMissedIds) < MAX_COVERAGE_TRACING {
-				t.lastMissedIds = append(t.lastMissedIds, lastMissedId)
-			}
-			if len(t.lastDistanceBits) < MAX_COVERAGE_TRACING {
-				t.lastDistanceBits = append(t.lastDistanceBits, distanceBits)
-			}
+
+			t.lastMissedId = lastMissedId
+
+			t.lastDistanceBits = uint32(distanceBits)
 
 			// fmt.Printf("CuEVM Debug: Missed ID calculated: %d (pc_missed: %d, distance_bits: %d)\n",
 			// 	t.lastMissedId, pc_missed, distanceBits)
@@ -606,8 +600,8 @@ func (t *CoverageTracer) CaptureTxEndSetAdditionalResults(results *types.Message
 	results.AdditionalResults[coverageTracerResultsKey] = t.coverageMaps
 
 	// Store coverage tracking results
-	results.AdditionalResults[coverageTracerResultsKeyLastId] = t.lastCoverageIds
-	results.AdditionalResults[coverageTracerResultsKeyMissedId] = t.lastMissedIds
+	results.AdditionalResults[coverageTracerResultsKeyLastId] = t.lastCoverageId
+	results.AdditionalResults[coverageTracerResultsKeyMissedId] = t.lastMissedId
 	results.AdditionalResults[coverageTracerResultsKeyDistanceBits] = t.lastDistanceBits
 	results.AdditionalResults[coverageTracerResultsKeyStorageIds] = t.storageIds
 	// fmt.Println("CuEVM Debug: CaptureTxEndSetAdditionalResults")

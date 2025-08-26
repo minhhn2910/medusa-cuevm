@@ -1327,19 +1327,33 @@ func (f *Fuzzer) seedCorpus() {
 					continue
 				}
 				element1, _ := worker.sequenceGenerator.generateNewElementWithChosenMethod(selectedMethod, true)
-
 				sequence := calls.CallSequence{element, element1}
+				if selectedMethod.Method.Sig == "CuEVM::fallback()" {
+					element2, _ := element.Clone()
+					element2.Call.Data = make([]byte, 0) // blank data, no value
 
+					element3, _ := element1.Clone()
+					element3.Call.Data = make([]byte, 0) // blank data, no value
+
+					sequence = calls.CallSequence{element, element1, element2, element3}
+					// fmt.Println("\n\nCuEVM Debug: fallback sequence\n\n")
+				} else if len(element.Call.Data) > 4 {
+					element2, _ := element.Clone()
+					element2.Call.Data = element2.Call.Data[:len(element2.Call.Data)-4]
+					sequence = calls.CallSequence{element, element1, element2}
+
+				}
 				executionCheckFunc := func(seq calls.CallSequence) (bool, error) {
 					return false, f.corpus.CheckSequenceCoverageAndUpdate(seq, worker.getNewCorpusCallSequenceWeight(), true)
 				}
-				fmt.Println("CuEVM Debug: Prepare to process seed sequence", sequence)
+				// fmt.Println("CuEVM Debug: Prepare to process seed sequence", sequence)
 				_, err = calls.SimulateExecuteCallSequenceGPUWithList(worker.chain, sequence, executionCheckFunc)
 
 				// Test sequence (inline logic from addCallSequenceCorpusLoop)
 				if worker.chain.RevertToBlockIndex(worker.testingBaseBlockIndex) != nil {
 					continue
 				}
+
 			}
 		}(i, startIdx, endIdx)
 	}
@@ -2536,7 +2550,7 @@ func (f *Fuzzer) Start() error {
 	f.randomProvider = rand.New(rand.NewSource(1))
 
 	// CuEVM Debug: fixed number of CPU workers
-	f.numCPUWorkers = runtime.NumCPU()
+	f.numCPUWorkers = 24 // runtime.NumCPU()
 	f.GPUchainInitiated = false
 	rawSequencesPerWorker := (f.config.Fuzzing.Workers / f.skipSequenceSize) / f.numCPUWorkers
 
@@ -2916,7 +2930,7 @@ func (f *Fuzzer) printMetricsLoop() {
 		}
 
 		// Sleep some time between print iterations
-		time.Sleep(time.Second * 2)
+		time.Sleep(time.Second * 1)
 	}
 }
 

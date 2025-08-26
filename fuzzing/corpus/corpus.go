@@ -476,13 +476,13 @@ func (c *Corpus) addCallSequenceWithCoverageId(sequenceFiles *corpusDirectory[ca
 
 	// Update our corpus directory with the new entry.
 	fileName := fmt.Sprintf("%v-%v.json", time.Now().UnixNano(), uuid.New().String())
-	fmt.Println("Adding sequence to corpus, weight: ", mutationChooserWeight, "fileName: ", fileName)
+	// fmt.Println("Adding sequence to corpus, weight: ", mutationChooserWeight, "fileName: ", fileName)
 	if coverageId != nil {
 		fmt.Println("Coverage ID: ", *coverageId)
 		// Track the coverage ID to file mapping
 		c.coverageIdToFile[*coverageId] = fileName
 	}
-	fmt.Println("Sequence ", sequence)
+	// fmt.Println("Sequence ", sequence)
 
 	err = sequenceFiles.addFile(fileName, sequence)
 	if err != nil {
