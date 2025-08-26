@@ -1,6 +1,7 @@
 {
   "fuzzing": {
     "workers": 16384,
+    "cpuWorkers": 24,
     "workerResetLimit": 50,
     "timeout": 10,
     "testLimit": 10000,

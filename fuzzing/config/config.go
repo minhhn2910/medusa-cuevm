@@ -37,6 +37,9 @@ type FuzzingConfig struct {
 	// Workers describes the amount of threads to use in fuzzing campaigns.
 	Workers int `json:"workers"`
 
+	// CPUWorkers describes the amount of CPU workers to use in fuzzing campaigns.
+	CPUWorkers int `json:"cpuWorkers"`
+
 	// WorkerResetLimit describes how many call sequences a worker should test before it is destroyed and recreated
 	// so that memory from its underlying chain is freed.
 	WorkerResetLimit int `json:"workerResetLimit"`

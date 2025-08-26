@@ -2629,7 +2629,7 @@ func (f *Fuzzer) Start() error {
 	f.randomProvider = rand.New(rand.NewSource(1))
 
 	// CuEVM Debug: fixed number of CPU workers
-	f.numCPUWorkers = 24 // runtime.NumCPU()
+	f.numCPUWorkers = f.config.Fuzzing.CPUWorkers // runtime.NumCPU()
 	f.GPUchainInitiated = false
 	rawSequencesPerWorker := (f.config.Fuzzing.Workers / f.skipSequenceSize) / f.numCPUWorkers
 
