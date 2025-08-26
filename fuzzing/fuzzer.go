@@ -504,48 +504,50 @@ func (f *Fuzzer) AddCompilationTargets(compilations []compilationTypes.Compilati
 		target = strings.TrimPrefix(target, "CUEVM_ETHERSCAN_TARGET")
 	}
 	// Run slither and handle errors
-	slitherResults, err := f.config.Slither.RunSlither(target, isEtherScan)
-	if err != nil || slitherResults == nil {
-		if err != nil {
-			f.logger.Warn("Failed to run slither", err)
-		}
-		seedFromAST = true
-	}
+	// slitherResults, err := f.config.Slither.RunSlither(target, isEtherScan)
+	// slitherResults = nil
+	// if err != nil || slitherResults == nil {
+	// 	if err != nil {
+	// 		f.logger.Warn("Failed to run slither", err)
+	// 	}
 
+	// }
+	seedFromAST = true
+	f.slitherResults = nil
 	// If we have results and there were no errors, we will seed the value set using the slither results
-	if !seedFromAST {
-		f.slitherResults = slitherResults
-		// Seed our base value set with the constants extracted by Slither
-		f.baseValueSet.SeedFromSlither(slitherResults)
-		sender_set := make(map[common.Address]bool)
-		// CuEVM add address constants to sender list
-		constant_count := 0
-		for _, constant := range slitherResults.Constants {
-			if constant.Type == "address" {
-				fmt.Printf("CuEVM Debug: constant: %s\n", constant.Value)
-				var addressBigInt, _ = new(big.Int).SetString(constant.Value, 10)
-				if addressBigInt.Cmp(new(big.Int).SetUint64(4294967296)) < 0 {
-					continue
-				}
-				address := common.BigToAddress(addressBigInt)
-				if err != nil {
-					f.logger.Warn("Failed to convert constant to address", err)
-				}
-				if !sender_set[address] {
-					fmt.Printf("CuEVM Debug: adding address: to sender list %s\n", address)
-					f.senders = append(f.senders, address)
-					constant_count++
-					if constant_count > 8 {
-						// dont extract so many to become sender
-						break
-					}
-					sender_set[address] = true
+	// if !seedFromAST {
+	// 	f.slitherResults = slitherResults
+	// 	// Seed our base value set with the constants extracted by Slither
+	// 	f.baseValueSet.SeedFromSlither(slitherResults)
+	// 	sender_set := make(map[common.Address]bool)
+	// 	// CuEVM add address constants to sender list
+	// 	constant_count := 0
+	// 	for _, constant := range slitherResults.Constants {
+	// 		if constant.Type == "address" {
+	// 			fmt.Printf("CuEVM Debug: constant: %s\n", constant.Value)
+	// 			var addressBigInt, _ = new(big.Int).SetString(constant.Value, 10)
+	// 			if addressBigInt.Cmp(new(big.Int).SetUint64(4294967296)) < 0 {
+	// 				continue
+	// 			}
+	// 			address := common.BigToAddress(addressBigInt)
+	// 			if err != nil {
+	// 				f.logger.Warn("Failed to convert constant to address", err)
+	// 			}
+	// 			if !sender_set[address] {
+	// 				fmt.Printf("CuEVM Debug: adding address: to sender list %s\n", address)
+	// 				f.senders = append(f.senders, address)
+	// 				constant_count++
+	// 				if constant_count > 8 {
+	// 					// dont extract so many to become sender
+	// 					break
+	// 				}
+	// 				sender_set[address] = true
 
-					f.fuzableReturnAddress[address] = true
-				}
-			}
-		}
-	}
+	// 				f.fuzableReturnAddress[address] = true
+	// 			}
+	// 		}
+	// 	}
+	// }
 	// sort senders for deterministic mutation
 	sort.Slice(f.senders, func(i, j int) bool {
 		return f.senders[i].Hex() < f.senders[j].Hex()
