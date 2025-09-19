@@ -3,6 +3,7 @@ package types
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"time"
@@ -38,7 +39,8 @@ func NewDefaultSlitherConfig() (*SlitherConfig, error) {
 // SlitherResults describes a data structures that holds the interesting constants returned from slither
 type SlitherResults struct {
 	// Constants holds the constants extracted by slither
-	Constants []Constant `json:"constantsUsed"`
+	Constants         []Constant                    `json:"constantsUsed"`
+	FunctionRelations map[string][]FunctionRelation `json:"functionRelations"`
 }
 
 // Constant defines a constant that was extracted by slither while parsing the compilation target
@@ -47,6 +49,16 @@ type Constant struct {
 	Type string `json:"type"`
 	// Value represents the value of the constant
 	Value string `json:"value"`
+}
+
+// FunctionRelation describes the relation between functions in a contract
+// impacts: functions this function impacts
+// is_impacted_by: functions that impact this function
+type FunctionRelation struct {
+	Contract     string   `json:"contract"`
+	Function     string   `json:"function"`
+	Impacts      []string `json:"impacts"`
+	IsImpactedBy []string `json:"is_impacted_by"`
 }
 
 // validateArgs ensures that the additional arguments provided to slither do not contain the `--ignore-compile`,
@@ -80,7 +92,7 @@ func (s *SlitherConfig) getArgs(target string) ([]string, error) {
 
 // RunSlither on the provided compilation target. RunSlither will use cached results if they exist and write to the
 // cache if we have not written to the cache already. A SlitherResults data structure is returned.
-func (s *SlitherConfig) RunSlither(target string) (*SlitherResults, error) {
+func (s *SlitherConfig) RunSlither(target string, isEtherScan bool) (*SlitherResults, error) {
 	// Return early if we do not want to run slither
 	if !s.UseSlither {
 		return nil, nil
@@ -93,17 +105,20 @@ func (s *SlitherConfig) RunSlither(target string) (*SlitherResults, error) {
 	if s.CachePath != "" && !s.OverwriteCache {
 		// Check to see if the file exists in the first place.
 		// If not, we will re-run slither
-		if _, err = os.Stat(s.CachePath); os.IsNotExist(err) {
-			logging.GlobalLogger.Info("No Slither cached results found at ", s.CachePath)
-			haveCachedResults = false
-		} else {
-			// We found the cached file
-			if out, err = os.ReadFile(s.CachePath); err != nil {
-				return nil, err
-			}
-			haveCachedResults = true
-			logging.GlobalLogger.Info("Using cached Slither results found at ", s.CachePath)
-		}
+		// CuEVM debug: always re-run slither
+		haveCachedResults = false
+		// if _, err = os.Stat(s.CachePath); os.IsNotExist(err) {
+		// 	logging.GlobalLogger.Info("No Slither cached results found at ", s.CachePath)
+		// 	haveCachedResults = false
+		// } else
+		//  {
+		// 	// We found the cached file
+		// 	if out, err = os.ReadFile(s.CachePath); err != nil {
+		// 		return nil, err
+		// 	}
+		// 	haveCachedResults = true
+		// 	logging.GlobalLogger.Info("Using cached Slither results found at ", s.CachePath)
+		// }
 	}
 
 	// Run slither if we do not have cached results, or we cannot find the cached results
@@ -119,6 +134,10 @@ func (s *SlitherConfig) RunSlither(target string) (*SlitherResults, error) {
 			return nil, err
 		}
 
+		if isEtherScan {
+			args = append(args, "--compile-force-framework", "etherscan", "--etherscan-json-file", target)
+		}
+		fmt.Println("CuEVM Debug: args", args)
 		// Log the command
 		cmd := exec.Command("slither", args...)
 		logging.GlobalLogger.Info("Running Slither:\n", cmd.String())
@@ -126,6 +145,8 @@ func (s *SlitherConfig) RunSlither(target string) (*SlitherResults, error) {
 		// Run slither
 		start := time.Now()
 		out, err = cmd.CombinedOutput()
+		// fmt.Printf("CuEVM Debug: out: %s\n", out)
+		// fmt.Printf("CuEVM Debug: err: %s\n", err)
 		if err != nil {
 			return nil, err
 		}
@@ -188,6 +209,7 @@ func (s *SlitherResults) UnmarshalJSON(d []byte) error {
 
 	// Now we will extract the constants
 	s.Constants = make([]Constant, 0)
+	s.FunctionRelations = make(map[string][]FunctionRelation)
 
 	// Iterate through the JSON object until we get to the constants_used key
 	// First, retrieve the results
@@ -243,6 +265,28 @@ func (s *SlitherResults) UnmarshalJSON(d []byte) error {
 				// Slither outputs the value of a constant as a list
 				// However we know there can be only 1 so we take index 0
 				s.Constants = append(s.Constants, constant[0])
+			}
+		}
+	}
+
+	// --- Parse function relations ---
+	if v, ok := description["functions_relations"]; ok {
+		var fr map[string]map[string]struct {
+			Impacts      []string `json:"impacts"`
+			IsImpactedBy []string `json:"is_impacted_by"`
+		}
+		if err := json.Unmarshal(v, &fr); err != nil {
+			return err
+		}
+		for contract, funcs := range fr {
+			for fname, rel := range funcs {
+				relation := FunctionRelation{
+					Contract:     contract,
+					Function:     fname,
+					Impacts:      rel.Impacts,
+					IsImpactedBy: rel.IsImpactedBy,
+				}
+				s.FunctionRelations[contract] = append(s.FunctionRelations[contract], relation)
 			}
 		}
 	}

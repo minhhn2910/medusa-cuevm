@@ -36,7 +36,7 @@ func (cs CallSequence) Log() *logging.LogBuffer {
 		buffer.Append(fmt.Sprintf("%d) %s\n", i+1, cs[i].String()))
 
 		// If we have an execution trace attached, print information about it.
-		if cs[i].ExecutionTrace != nil {
+		if cs[i] != nil && cs[i].ExecutionTrace != nil {
 			buffer.Append(cs[i].ExecutionTrace.Log().Elements()...)
 			buffer.Append("\n")
 		}
@@ -230,6 +230,9 @@ func (cse *CallSequenceElement) DecodedReturnValues() ([]any, error) {
 
 // String returns a displayable string representing the CallSequenceElement.
 func (cse *CallSequenceElement) String() string {
+	if cse == nil {
+		return "<none>"
+	}
 	// Obtain our contract name
 	contractName := "<unresolved contract>"
 	if cse.Contract != nil {
@@ -248,7 +251,12 @@ func (cse *CallSequenceElement) String() string {
 	// CuEVM: disable label for now
 	labels := make(map[common.Address]string)
 	// Next decode our arguments (we jump four bytes to skip the function selector)
-	args, err := method.Inputs.Unpack(cse.Call.Data[4:])
+	var args []any
+	if method.Sig != "CuEVM::fallback()" {
+		args, err = method.Inputs.Unpack(cse.Call.Data[4:])
+	} else {
+		args, err = method.Inputs.Unpack(cse.Call.Data)
+	}
 	argsText := "<unable to unpack args>"
 	if err == nil {
 		argsText, err = valuegeneration.EncodeABIArgumentsToString(method.Inputs, args, labels)
@@ -263,6 +271,9 @@ func (cse *CallSequenceElement) String() string {
 	if cse.ChainReference != nil {
 		blockNumberStr = cse.ChainReference.Block.Header.Number.String()
 		blockTimeStr = strconv.FormatUint(cse.ChainReference.Block.Header.Time, 10)
+	} else {
+		blockNumberStr = "d+" + strconv.FormatUint(cse.BlockNumberDelay, 10)
+		blockTimeStr = "d+" + strconv.FormatUint(cse.BlockTimestampDelay, 10)
 	}
 
 	// Trim the leading zeros and use the labels

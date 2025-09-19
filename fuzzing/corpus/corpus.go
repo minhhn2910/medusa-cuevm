@@ -11,6 +11,7 @@ import (
 
 	"github.com/crytic/medusa-geth/common"
 	"github.com/crytic/medusa/chain"
+	"github.com/crytic/medusa/compilation/types"
 	"github.com/crytic/medusa/fuzzing/calls"
 	"github.com/crytic/medusa/fuzzing/coverage"
 	"github.com/crytic/medusa/logging"
@@ -39,6 +40,9 @@ type Corpus struct {
 	// to be saved by a test case provider. These are not used in mutations.
 	testResultSequenceFiles *corpusDirectory[calls.CallSequence]
 
+	// coverageIdToFile maps coverage IDs to their corresponding file names for replacement logic
+	coverageIdToFile map[uint32]string
+
 	// unexecutedCallSequences defines the callSequences which have not yet been executed by the fuzzer. As each item
 	// is selected for execution by the fuzzer on startup, it is removed. This way, all call sequences loaded from disk
 	// are executed to check for test failures.
@@ -65,6 +69,7 @@ func NewCorpus(corpusDirectory string) (*Corpus, error) {
 		coverageMaps:            coverage.NewCoverageMaps(),
 		callSequenceFiles:       newCorpusDirectory[calls.CallSequence](""),
 		testResultSequenceFiles: newCorpusDirectory[calls.CallSequence](""),
+		coverageIdToFile:        make(map[uint32]string),
 		unexecutedCallSequences: make([]calls.CallSequence, 0),
 		logger:                  logging.GlobalLogger.NewSubLogger("module", "corpus"),
 	}
@@ -389,17 +394,60 @@ func (c *Corpus) Initialize(baseTestChain *chain.TestChain, contractDefinitions 
 // addCallSequence adds a call sequence to the corpus in a given corpus directory.
 // Returns an error, if one occurs.
 func (c *Corpus) addCallSequence(sequenceFiles *corpusDirectory[calls.CallSequence], sequence calls.CallSequence, useInMutations bool, mutationChooserWeight *big.Int, flushImmediately bool) error {
+	return c.addCallSequenceWithCoverageId(sequenceFiles, sequence, useInMutations, mutationChooserWeight, flushImmediately, nil)
+}
+
+// addCallSequenceWithCoverageId adds a call sequence to the corpus with optional coverage ID-based replacement.
+// If coverageId is provided and a sequence with the same coverage ID exists, it will be replaced if the new sequence is better.
+// Returns an error, if one occurs.
+func (c *Corpus) addCallSequenceWithCoverageId(sequenceFiles *corpusDirectory[calls.CallSequence], sequence calls.CallSequence, useInMutations bool, mutationChooserWeight *big.Int, flushImmediately bool, coverageId *uint32) error {
 	// fmt.Println("\n\nMedusa: addCallSequence, current files number: ", len(sequenceFiles.files), "\n\n")
 	// Acquire a thread lock during modification of call sequence lists.
 	c.callSequencesLock.Lock()
 
-	// Check if call sequence has been added before, if so, exit without any action.
+	// Handle coverage ID-based replacement if coverage ID is provided
+	if coverageId != nil {
+		if existingFileName, exists := c.coverageIdToFile[*coverageId]; exists {
+			// Find the existing sequence with this coverage ID
+			for _, existingSeq := range sequenceFiles.files {
+				if existingSeq.fileName == existingFileName {
+					fmt.Println("Replacing existing sequence with coverage ID", *coverageId)
+					// Update the existing file with new sequence data
+					err := sequenceFiles.addFile(existingFileName, sequence)
+					if err != nil {
+						c.callSequencesLock.Unlock()
+						return err
+					}
+
+					// Replace entry in mutation chooser
+					if useInMutations && c.mutationTargetSequenceChooser != nil {
+						if mutationChooserWeight == nil {
+							mutationChooserWeight = big.NewInt(1)
+						}
+						// Remove old entry with same coverage ID
+						c.mutationTargetSequenceChooser.RemoveChoiceByUniqueId(*coverageId)
+						// Add new entry with same coverage ID
+						c.mutationTargetSequenceChooser.AddChoices(randomutils.NewWeightedRandomChoiceWithId[calls.CallSequence](sequence, mutationChooserWeight, *coverageId))
+					}
+
+					c.callSequencesLock.Unlock()
+					if flushImmediately {
+						return c.Flush()
+					}
+					return nil
+				}
+			}
+		}
+	}
+
+	// Check if call sequence has been added before by hash, if so, exit without any action.
 	seqHash, err := sequence.Hash()
 	if err != nil {
+		c.callSequencesLock.Unlock()
 		return err
 	}
 
-	// Verify no existing corpus item hash this same hash.
+	// Verify no existing corpus item has this same hash.
 	for _, existingSeq := range sequenceFiles.files {
 		// Calculate the existing sequence hash
 		existingSeqHash, err := existingSeq.data.Hash()
@@ -417,8 +465,17 @@ func (c *Corpus) addCallSequence(sequenceFiles *corpusDirectory[calls.CallSequen
 
 	// Update our corpus directory with the new entry.
 	fileName := fmt.Sprintf("%v-%v.json", time.Now().UnixNano(), uuid.New().String())
+	fmt.Println("Adding sequence to corpus, weight: ", mutationChooserWeight, "fileName: ", fileName)
+	if coverageId != nil {
+		fmt.Println("Coverage ID: ", *coverageId)
+		// Track the coverage ID to file mapping
+		c.coverageIdToFile[*coverageId] = fileName
+	}
+	fmt.Println("Sequence ", sequence)
+
 	err = sequenceFiles.addFile(fileName, sequence)
 	if err != nil {
+		c.callSequencesLock.Unlock()
 		return err
 	}
 
@@ -427,7 +484,12 @@ func (c *Corpus) addCallSequence(sequenceFiles *corpusDirectory[calls.CallSequen
 		if mutationChooserWeight == nil {
 			mutationChooserWeight = big.NewInt(1)
 		}
-		c.mutationTargetSequenceChooser.AddChoices(randomutils.NewWeightedRandomChoice[calls.CallSequence](sequence, mutationChooserWeight))
+		// Use coverage ID as uniqueId if available, otherwise use default (0)
+		if coverageId != nil {
+			c.mutationTargetSequenceChooser.AddChoices(randomutils.NewWeightedRandomChoiceWithId[calls.CallSequence](sequence, mutationChooserWeight, *coverageId))
+		} else {
+			c.mutationTargetSequenceChooser.AddChoices(randomutils.NewWeightedRandomChoice[calls.CallSequence](sequence, mutationChooserWeight))
+		}
 	}
 
 	// Unlock now, as flushing will lock on its own.
@@ -481,11 +543,12 @@ func (c *Corpus) CheckSequenceCoverageAndUpdate(callSequence calls.CallSequence,
 	if err != nil {
 		return err
 	}
-	// fmt.Println("Medusa: coverage after update")
-	// fmt.Println(c.coverageMaps.DebugString())
+
 	// If we had an increase in coverage, we save the sequence.
 	if coverageUpdated {
 		// fmt.Println("\nMedusa: coverage updated\n")
+		// fmt.Println("Medusa: coverage after update")
+		// fmt.Println(c.coverageMaps.DebugString())
 		// If we achieved new coverage, save this sequence for mutation purposes.
 		err = c.addCallSequence(c.callSequenceFiles, callSequence, true, mutationChooserWeight, flushImmediately)
 		if err != nil {
@@ -495,9 +558,63 @@ func (c *Corpus) CheckSequenceCoverageAndUpdate(callSequence calls.CallSequence,
 	return nil
 }
 
+// debug, to be deleted
+func (c *Corpus) CheckSequenceCoverageAndUpdateDebug(callSequence calls.CallSequence, mutationChooserWeight *big.Int, flushImmediately bool, compilations []types.Compilation) error {
+	// fmt.Println("\nMedusa: CheckSequenceCoverageAndUpdate\n")
+	// If we have coverage-guided fuzzing disabled or no calls in our sequence, there is nothing to do.
+	if len(callSequence) == 0 {
+		return nil
+	}
+
+	// Obtain our coverage maps for our last call.
+	lastCall := callSequence[len(callSequence)-1]
+	lastCallChainReference := lastCall.ChainReference
+	lastMessageResult := lastCallChainReference.Block.MessageResults[lastCallChainReference.TransactionIndex]
+
+	lastMessageCoverageMaps := coverage.GetCoverageTracerResults(lastMessageResult)
+	// fmt.Println("\nMedusa: lastMessageCoverageMaps\n")
+	// fmt.Println(lastMessageCoverageMaps.DebugString())
+	// If we have none, because a coverage tracer wasn't attached when processing this call, we can stop.
+	if lastMessageCoverageMaps == nil {
+		return nil
+	}
+
+	// Memory optimization: Remove them from the results now that we obtained them, to free memory later.
+	// coverage.RemoveCoverageTracerResults(lastMessageResult)
+	// fmt.Println("Medusa: coverage before update")
+	// fmt.Println(c.coverageMaps.DebugString())
+	// Merge the coverage maps into our total coverage maps and check if we had an update.
+	coverageUpdated, err := c.coverageMaps.Update(lastMessageCoverageMaps)
+	if err != nil {
+		return err
+	}
+
+	// If we had an increase in coverage, we save the sequence.
+	if coverageUpdated {
+		// fmt.Println("\nMedusa: coverage updated\n")
+		// fmt.Println("Medusa: coverage after update")
+		// fmt.Println(c.coverageMaps.DebugString())
+		// uniquePCs, _ := coverage.GetUniquePCsCount(compilations, c.coverageMaps, c.logger, false)
+
+		// fmt.Println("\n\nMEDUSA_UNIQUE_PC_COUNT:", uniquePCs, "\n\n")
+
+		// If we achieved new coverage, save this sequence for mutation purposes.
+		// err = c.addCallSequence(c.callSequenceFiles, callSequence, true, mutationChooserWeight, flushImmediately)
+		// if err != nil {
+		// 	return err
+		// }
+	}
+	return nil
+}
+
 // CuEVM: expose this function to be called in fuzzer.go
 func (c *Corpus) AddCallSequence(callSequence calls.CallSequence, mutationChooserWeight *big.Int) error {
 	return c.addCallSequence(c.callSequenceFiles, callSequence, true, mutationChooserWeight, true)
+}
+
+// AddCallSequenceWithCoverageId adds a call sequence with a coverage ID for potential replacement logic
+func (c *Corpus) AddCallSequenceWithCoverageId(callSequence calls.CallSequence, mutationChooserWeight *big.Int, coverageId uint32) error {
+	return c.addCallSequenceWithCoverageId(c.callSequenceFiles, callSequence, true, mutationChooserWeight, true, &coverageId)
 }
 
 // CuEVM: expose this function to be called in fuzzer.go
@@ -507,6 +624,10 @@ func (c *Corpus) ExtractAllSequences() []calls.CallSequence {
 	for _, file := range c.callSequenceFiles.files {
 		callSequencesToTest = append(callSequencesToTest, file.data)
 	}
+
+	// fmt.Println("CuEVM Debug: mutationTargetSequenceChooser")
+	// c.mutationTargetSequenceChooser.PrintChoices()
+	fmt.Println("\n\n Medusa: ExtractAllSequences\n\n")
 	return callSequencesToTest
 }
 

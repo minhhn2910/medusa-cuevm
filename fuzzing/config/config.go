@@ -62,6 +62,9 @@ type FuzzingConfig struct {
 	// CoverageEnabled describes whether to use coverage-guided fuzzing
 	CoverageEnabled bool `json:"coverageEnabled"`
 
+	// DeploymentCodeCoverageEnabled describes whether to use coverage-guided fuzzing for deployment code
+	DeploymentCodeCoverageEnabled bool `json:"deploymentCodeCoverageEnabled"`
+
 	// CoverageFormats indicate which reports to generate: "lcov" and "html" are supported.
 	CoverageFormats []string `json:"coverageFormats"`
 
@@ -82,6 +85,10 @@ type FuzzingConfig struct {
 	// ConstructorArgs holds the constructor arguments for TargetContracts deployments. It is available via the project
 	// configuration
 	ConstructorArgs map[string]map[string]any `json:"constructorArgs"`
+
+	// ConstructorArgsBytes holds the raw constructor arguments bytes for TargetContracts deployments as hex strings.
+	// This is tried before ConstructorArgs and before randomizing arguments.
+	ConstructorArgsBytes string `json:"constructorArgsBytes"`
 
 	// DeployerAddress describe the account address to be used to deploy contracts.
 	DeployerAddress string `json:"deployerAddress"`

@@ -36,14 +36,18 @@ func (vs *ValueSet) SeedFromAst(ast any) {
 					if b, ok := big.NewInt(0).SetString(literalValue[2:], 16); ok {
 						vs.AddInteger(b)
 						vs.AddInteger(new(big.Int).Neg(b))
-						vs.AddAddress(common.BigToAddress(b))
+						if b.Cmp(new(big.Int).SetUint64(4294967296)) > 0 {
+							vs.AddAddress(common.BigToAddress(b))
+						}
 					}
 				} else {
 					if decValue, err := decimal.NewFromString(literalValue); err == nil {
 						b := getAbsoluteValueFromDenominatedValue(decValue, literalSubdenomination)
 						vs.AddInteger(b)
 						vs.AddInteger(new(big.Int).Neg(b))
-						vs.AddAddress(common.BigToAddress(b))
+						if b.Cmp(new(big.Int).SetUint64(4294967296)) > 0 {
+							vs.AddAddress(common.BigToAddress(b))
+						}
 					}
 				}
 			} else if literalKind == "string" {

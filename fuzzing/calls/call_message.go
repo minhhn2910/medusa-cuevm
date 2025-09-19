@@ -17,6 +17,25 @@ import (
 //go:generate go get github.com/fjl/gencodec
 //go:generate go run github.com/fjl/gencodec -type CallMessage -field-override callMessageMarshaling -out gen_call_message_json.go
 
+// DataType is an enum for marking ABI-encoded data types in the call data mask.
+type DataType uint32
+
+const (
+	DataTypeUnknown DataType = 0
+	DataTypeAddress DataType = 1
+	DataTypeValue   DataType = 2
+	DataTypeBool    DataType = 3
+	// We utilize other non 8x values for other types
+	// For int/uint, use the number of bits as the enum value (8, 16, 32, 64, 128, 256, etc.)
+)
+
+// DataMarker marks a region in the call data for a specific ABI-encoded argument.
+type DataMarker struct {
+	Offset int      // Byte offset from the beginning of the call data
+	Type   DataType // Data type enum (see above)
+	Length int      // Length in bytes (usually 32)
+}
+
 // CallMessage implements and extends Ethereum's coreTypes.Message, used to apply EVM/state updates.
 type CallMessage struct {
 	// From represents a core.Message's from parameter (sender), indicating who sent a transaction/message to the
@@ -53,6 +72,9 @@ type CallMessage struct {
 	// value is not used.
 	Data []byte `json:"data,omitempty"`
 
+	// DataMarkers represents a list of markers for ABI-encoded arguments (offset, type, length)
+	DataMarkers []DataMarker `json:"dataMarkers,omitempty"`
+
 	// DataAbiValues represents the underlying message data to be sent to the receiver. If the receiver is a smart
 	// contract, this will likely house your call parameters and other serialized data. This overrides Data if it is
 	// set, allowing Data to be sourced from method ABI input arguments instead.
@@ -76,6 +98,7 @@ type callMessageMarshaling struct {
 	GasFeeCap *hexutil.Big
 	GasTipCap *hexutil.Big
 	Data      hexutil.Bytes
+	DataMask  hexutil.Bytes
 }
 
 // NewCallMessage instantiates a new call message from a given set of parameters, with call data set from bytes.
@@ -92,6 +115,25 @@ func NewCallMessage(from common.Address, to *common.Address, nonce uint64, value
 		GasTipCap:         gasTipCap,
 		Data:              data,
 		DataAbiValues:     nil,
+		AccessList:        nil,
+		SkipAccountChecks: false,
+	}
+}
+
+// NewCallMessage instantiates a new call message from a given set of parameters, with call data set from bytes.
+func NewCallMessageWithData(from common.Address, to *common.Address, nonce uint64, value *big.Int, gasLimit uint64, gasPrice, gasFeeCap, gasTipCap *big.Int, data []byte, dataAbiValues *CallMessageDataAbiValues) *CallMessage {
+	// Construct and return a new message from our given parameters.
+	return &CallMessage{
+		From:              from,
+		To:                to,
+		Nonce:             nonce,
+		Value:             value,
+		GasLimit:          gasLimit,
+		GasPrice:          gasPrice,
+		GasFeeCap:         gasFeeCap,
+		GasTipCap:         gasTipCap,
+		Data:              data,
+		DataAbiValues:     dataAbiValues,
 		AccessList:        nil,
 		SkipAccountChecks: false,
 	}
@@ -127,6 +169,40 @@ func NewCallMessageWithAbiValueData(from common.Address, to *common.Address, non
 	}
 }
 
+// NewCallMessageWithAbiValueDataAndMask instantiates a new call message from a given set of parameters, with call data set
+// from method ABI specified inputs and returns both the message and a marker list indicating argument regions.
+func NewCallMessageWithAbiValueDataAndMask(from common.Address, to *common.Address, nonce uint64, value *big.Int, gasLimit uint64, gasPrice, gasFeeCap, gasTipCap *big.Int, abiData *CallMessageDataAbiValues) (*CallMessage, []DataMarker) {
+	// Pack the ABI value data with markers
+	var data []byte
+	var markers []DataMarker
+	var err error
+	if abiData != nil {
+		data, markers, err = abiData.PackWithMask()
+		if err != nil {
+			logging.GlobalLogger.Panic("Failed to pack call message ABI values with markers", err)
+		}
+	}
+
+	// Construct and return a new message from our given parameters.
+	message := &CallMessage{
+		From:              from,
+		To:                to,
+		Nonce:             nonce,
+		Value:             value,
+		GasLimit:          gasLimit,
+		GasPrice:          gasPrice,
+		GasFeeCap:         gasFeeCap,
+		GasTipCap:         gasTipCap,
+		Data:              data,
+		DataMarkers:       markers,
+		DataAbiValues:     abiData,
+		AccessList:        nil,
+		SkipAccountChecks: false,
+	}
+
+	return message, markers
+}
+
 // WithDataAbiValues resets the call message's data and ABI values, ensuring the values are in sync and
 // reusing the other existing fields.
 func (m *CallMessage) WithDataAbiValues(abiData *CallMessageDataAbiValues) {
@@ -134,16 +210,18 @@ func (m *CallMessage) WithDataAbiValues(abiData *CallMessageDataAbiValues) {
 		logging.GlobalLogger.Panic("Method ABI and data should always be defined")
 	}
 
-	// Pack the ABI value data
+	// Pack the ABI value data with markers
 	var data []byte
+	var markers []DataMarker
 	var err error
-	data, err = abiData.Pack()
+	data, markers, err = abiData.PackWithMask()
 	if err != nil {
-		logging.GlobalLogger.Panic("Failed to pack call message ABI values", err)
+		logging.GlobalLogger.Panic("Failed to pack call message ABI values with markers", err)
 	}
-	// Set our data and ABI values
+	// Set our data, markers, and ABI values
 	m.DataAbiValues = abiData
 	m.Data = data
+	m.DataMarkers = markers
 }
 
 // FillFromTestChainProperties populates gas limit, price, nonce, and other fields automatically based on the worker's
@@ -187,6 +265,7 @@ func (m *CallMessage) Clone() (*CallMessage, error) {
 		GasFeeCap:         new(big.Int).Set(m.GasFeeCap),
 		GasTipCap:         new(big.Int).Set(m.GasTipCap),
 		Data:              slices.Clone(m.Data),
+		DataMarkers:       append([]DataMarker(nil), m.DataMarkers...),
 		DataAbiValues:     clonedAbiValues,
 		AccessList:        m.AccessList,
 		SkipAccountChecks: m.SkipAccountChecks,
