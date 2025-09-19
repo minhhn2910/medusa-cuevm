@@ -86,6 +86,10 @@ type FuzzingConfig struct {
 	// configuration
 	ConstructorArgs map[string]map[string]any `json:"constructorArgs"`
 
+	// ConstructorArgsBytes holds the raw constructor arguments bytes for TargetContracts deployments as hex strings.
+	// This is tried before ConstructorArgs and before randomizing arguments.
+	ConstructorArgsBytes string `json:"constructorArgsBytes"`
+
 	// DeployerAddress describe the account address to be used to deploy contracts.
 	DeployerAddress string `json:"deployerAddress"`
 

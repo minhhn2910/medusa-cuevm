@@ -162,7 +162,7 @@ func (d *CallMessageDataAbiValues) PackWithMask() ([]byte, []DataMarker, error) 
 
 	// add special marker for Value muation
 	if d.Method.IsPayable() {
-		markers = append(markers, DataMarker{Offset: 0, Type: DataTypeValue, Length: 32})
+		markers = append(markers, DataMarker{Offset: 0, Type: DataTypeValue, Length: 0})
 	}
 	// --- Pass 1: Pack arguments and build argData ---
 
@@ -207,66 +207,147 @@ func (d *CallMessageDataAbiValues) PackWithMask() ([]byte, []DataMarker, error) 
 		}
 	}
 	argData := append(head, tail...)
-
 	// --- Pass 2: Generate markers using the final argData ---
 
-	var walkAndMark func(typ abi.Type, offset int)
-	walkAndMark = func(typ abi.Type, offset int) {
+	// Helper function to safely clear markers when invalid data is detected
+	clearMarkers := func() {
+		markers = []DataMarker{}
+	}
+
+	var walkAndMark func(typ abi.Type, offset int) bool
+	walkAndMark = func(typ abi.Type, offset int) bool {
+		// Bounds check: ensure we don't read beyond argData
+		if offset < 0 || offset >= len(argData) {
+			clearMarkers()
+			return false // Invalid data detected
+		}
+
 		switch typ.T {
 		case abi.IntTy, abi.UintTy:
-			markers = append(markers, DataMarker{Offset: offset, Type: DataType(typ.Size), Length: 32})
+			if offset+32 <= len(argData) {
+				markers = append(markers, DataMarker{Offset: offset, Type: DataType(typ.Size), Length: 32})
+			} else {
+				clearMarkers()
+				return false
+			}
 		case abi.BoolTy:
-			markers = append(markers, DataMarker{Offset: offset, Type: DataTypeBool, Length: 32})
+			if offset+32 <= len(argData) {
+				markers = append(markers, DataMarker{Offset: offset, Type: DataTypeBool, Length: 32})
+			} else {
+				clearMarkers()
+				return false
+			}
 		case abi.AddressTy:
-			markers = append(markers, DataMarker{Offset: offset, Type: DataTypeAddress, Length: 32})
+			if offset+32 <= len(argData) {
+				markers = append(markers, DataMarker{Offset: offset, Type: DataTypeAddress, Length: 32})
+			} else {
+				clearMarkers()
+				return false
+			}
 		case abi.TupleTy:
 			elemOffset := 0
 			for _, elemTyp := range typ.TupleElems {
 				fieldOffset := offset + elemOffset
+				if fieldOffset+32 > len(argData) {
+					clearMarkers()
+					return false
+				}
 				if isDynamicType(*elemTyp) {
 					dynamicElemOffset := int(common.BytesToHash(argData[fieldOffset : fieldOffset+32]).Big().Int64())
-					walkAndMark(*elemTyp, offset+dynamicElemOffset)
+					// Validate the dynamic offset before recursing
+					if dynamicElemOffset < 0 || dynamicElemOffset >= len(argData) {
+						clearMarkers()
+						return false
+					}
+					if !walkAndMark(*elemTyp, offset+dynamicElemOffset) {
+						return false
+					}
 					elemOffset += 32
 				} else {
-					walkAndMark(*elemTyp, fieldOffset)
+					if !walkAndMark(*elemTyp, fieldOffset) {
+						return false
+					}
 					elemOffset += getTypeSize(*elemTyp)
 				}
 			}
 		case abi.SliceTy: // Dynamic Array
+			if offset+32 > len(argData) {
+				clearMarkers()
+				return false
+			}
 			length := int(common.BytesToHash(argData[offset : offset+32]).Big().Int64())
+			// Sanity check: prevent extremely large arrays that would cause infinite loops
+			if length < 0 || length > 64 {
+				clearMarkers()
+				return false
+			}
 			elemDataStart := offset + 32
 			elemSize := getTypeSize(*typ.Elem)
 			for i := 0; i < length; i++ {
 				elemPos := elemDataStart + (i * elemSize)
+				if elemPos >= len(argData) {
+					clearMarkers()
+					return false
+				}
 				if isDynamicType(*typ.Elem) {
+					if elemPos+32 > len(argData) {
+						clearMarkers()
+						return false
+					}
 					dynamicElemOffset := int(common.BytesToHash(argData[elemPos : elemPos+32]).Big().Int64())
-					walkAndMark(*typ.Elem, offset+dynamicElemOffset)
+					// Validate the dynamic offset before recursing
+					if dynamicElemOffset < 0 || dynamicElemOffset >= len(argData) {
+						clearMarkers()
+						return false
+					}
+					if !walkAndMark(*typ.Elem, elemDataStart+dynamicElemOffset) {
+						return false
+					}
 				} else {
-					walkAndMark(*typ.Elem, elemPos)
+					if !walkAndMark(*typ.Elem, elemPos) {
+						return false
+					}
 				}
 			}
 		case abi.ArrayTy: // Static Array
 			elemSize := getTypeSize(*typ.Elem)
 			for i := 0; i < typ.Size; i++ {
-				walkAndMark(*typ.Elem, offset+(i*elemSize))
+				elemOffset := offset + (i * elemSize)
+				if elemOffset >= len(argData) {
+					clearMarkers()
+					return false
+				}
+				if !walkAndMark(*typ.Elem, elemOffset) {
+					return false
+				}
 			}
 		}
+		return true
 	}
 
 	headReadOffset := 0
 	for _, arg := range abiArgs {
 		if isDynamicType(arg.Type) {
+			if headReadOffset+32 > len(argData) {
+				clearMarkers()
+				break
+			}
 			dynamicOffset := int(common.BytesToHash(argData[headReadOffset : headReadOffset+32]).Big().Int64())
-			walkAndMark(arg.Type, dynamicOffset)
+			if !walkAndMark(arg.Type, dynamicOffset) {
+				break // Stop processing if invalid data detected
+			}
 			headReadOffset += 32
 		} else {
-			walkAndMark(arg.Type, headReadOffset)
+			if !walkAndMark(arg.Type, headReadOffset) {
+				break // Stop processing if invalid data detected
+			}
 			headReadOffset += getTypeSize(arg.Type)
 		}
 	}
+	// fmt.Println("CuEVM Debug: markers", markers)
 
 	// Adjust all marker offsets by 4 bytes for the method ID.
-	if d.Method.Sig != "CuEVM::fallback()" {
+	if d.Method.Sig != "CuEVM::fallback()" && d.Method.Sig != "CuEVM::fallback_payable()" {
 		for i := range markers {
 			markers[i].Offset += 4
 		}

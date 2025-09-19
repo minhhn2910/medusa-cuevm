@@ -1,17 +1,18 @@
 {
   "fuzzing": {
-    "workers": 2000,
+    "workers": 16384,
     "workerResetLimit": 50,
-    "timeout": 30,
+    "timeout": 10,
     "testLimit": 10000,
-    "callSequenceLength": 5,
+    "callSequenceLength": 1,
     "corpusDirectory": "",
     "coverageEnabled": true,
     "targetContracts": ["Test"],
     "targetContractsBalances": ["0x0"],
     "constructorArgs": {},
+    "constructorArgsBytes": "0x000000000000000000000000a9f488b9144d14d6d0de723f7ddd39b5f33ada8f",
     "deployerAddress": "0x30000",
-    "senderAddresses": ["0x10000", "0x20000", "0x30000"],
+    "senderAddresses": ["0x10000", "0x20000"],
     "blockNumberDelayMax": 60480,
     "blockTimestampDelayMax": 604800,
     "blockGasLimit": 125000000,
@@ -25,7 +26,7 @@
       "testViewMethods": true,
       "assertionTesting": {
         "enabled": true,
-        "testViewMethods": true,
+        "testViewMethods": false,
         "panicCodeConfig": {
           "failOnCompilerInsertedPanic": false,
           "failOnAssertion": true,
@@ -51,7 +52,7 @@
     "chainConfig": {
       "codeSizeCheckDisabled": true,
       "cheatCodes": {
-        "cheatCodesEnabled": true,
+        "cheatCodesEnabled": false,
         "enableFFI": false
       }
     }
@@ -60,7 +61,7 @@
     "platform": "crytic-compile",
     "platformConfig": {
       "target": "test.sol",
-      "solcVersion": "",
+      "solcVersion": "0.7.6",
       "exportDirectory": "",
       "args": []
     }

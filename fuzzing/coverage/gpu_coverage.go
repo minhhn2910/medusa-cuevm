@@ -10,11 +10,16 @@ import (
 // GPUExecutionResult represents essential execution data from the GPU
 type GPUExecutionResult struct {
 	// Coverage information
-	NewCoverageIndices [][]uint32
-
+	NewCoverageThreadIdx [][]uint32
+	NewCoverageIds       [][]uint32
 	// Bug information
-	NewBugIndices [][]uint32
-	NewBugPCs     [][]uint32
+	NewBugThreadIdx   [][]uint32
+	NewBugPCs         [][]uint32
+	NewBugTypes       [][]uint32
+	NewBugContractIds [][]uint32
+	// Storage information
+	NewStorageThreadIdx [][]uint32
+	NewStorageIds       [][]uint32
 }
 
 // DebugString returns a debug string representation of the result
@@ -24,26 +29,38 @@ func (r *GPUExecutionResult) DebugString() string {
 	}
 
 	var output strings.Builder
-	output.WriteString(fmt.Sprintf("GPUExecutionResult: %d batches\n", len(r.NewCoverageIndices)))
+	output.WriteString(fmt.Sprintf("GPUExecutionResult: %d batches\n", len(r.NewCoverageThreadIdx)))
 
-	for i := 0; i < len(r.NewCoverageIndices); i++ {
+	for i := 0; i < len(r.NewCoverageThreadIdx); i++ {
 		output.WriteString(fmt.Sprintf("\nBatch %d:\n", i))
-		output.WriteString(fmt.Sprintf("  New coverage entries: %d\n", len(r.NewCoverageIndices[i])))
-		if len(r.NewCoverageIndices[i]) > 0 {
-			output.WriteString(fmt.Sprintf("  Coverage indices: %v\n", r.NewCoverageIndices[i]))
+		output.WriteString(fmt.Sprintf("  New coverage entries: %d\n", len(r.NewCoverageThreadIdx[i])))
+		if len(r.NewCoverageThreadIdx[i]) > 0 {
+			output.WriteString(fmt.Sprintf("  Coverage indices: %v\n", r.NewCoverageThreadIdx[i]))
+			output.WriteString(fmt.Sprintf("  Coverage ids: %x\n", r.NewCoverageIds[i]))
 		}
 
 		numBugs := 0
-		if i < len(r.NewBugIndices) {
-			numBugs = len(r.NewBugIndices[i])
+		if i < len(r.NewBugThreadIdx) {
+			numBugs = len(r.NewBugThreadIdx[i])
 		}
 
 		output.WriteString(fmt.Sprintf("  New bugs found: %d\n", numBugs))
 		if numBugs > 0 {
-			output.WriteString(fmt.Sprintf("  Bug indices: %v\n", r.NewBugIndices[i]))
+			output.WriteString(fmt.Sprintf("  Bug indices: %v\n", r.NewBugThreadIdx[i]))
 			if i < len(r.NewBugPCs) {
 				output.WriteString(fmt.Sprintf("  Bug PCs: %v\n", r.NewBugPCs[i]))
+				output.WriteString(fmt.Sprintf("  Bug types: %v\n", r.NewBugTypes[i]))
 			}
+		}
+
+		numStorage := 0
+		if i < len(r.NewStorageThreadIdx) {
+			numStorage = len(r.NewStorageThreadIdx[i])
+		}
+		output.WriteString(fmt.Sprintf("  New storage entries: %d\n", numStorage))
+		if numStorage > 0 {
+			output.WriteString(fmt.Sprintf("  Storage indices: %v\n", r.NewStorageThreadIdx[i]))
+			output.WriteString(fmt.Sprintf("  Storage ids: %x\n", r.NewStorageIds[i]))
 		}
 	}
 

@@ -33,6 +33,9 @@ type CryticCompilationConfig struct {
 
 	// SkipSolcInstall is a flag to skip the installation, this assumes that the solc version is already installed by solc-select
 	SkipSolcInstall bool `json:"skipSolcInstall"`
+
+	// EtherscanJsonFile is the path to the json file downloaded from etherscan to compile
+	EtherscanJsonFile bool `json:"etherscanJsonFile"`
 }
 
 // Platform returns the platform type
@@ -42,6 +45,9 @@ func (c *CryticCompilationConfig) Platform() string {
 
 // GetTarget returns the target for compilation
 func (c *CryticCompilationConfig) GetTarget() string {
+	if c.EtherscanJsonFile {
+		return "CUEVM_ETHERSCAN_TARGET" + c.Target
+	}
 	return c.Target
 }
 
@@ -116,13 +122,18 @@ func (c *CryticCompilationConfig) Compile() ([]types.Compilation, string, error)
 		return nil, "", err
 	}
 
+	if c.EtherscanJsonFile {
+		args = append(args, "--compile-force-framework", "etherscan", "--etherscan-json-file", c.Target)
+		fmt.Printf("CuEVM Debug: args: %s\n", args)
+	}
+	fmt.Printf("CuEVM Debug: args: %s\n", args)
 	// Get main command and set working directory
 	cmd := exec.Command("crytic-compile", args...)
 	logging.GlobalLogger.Info("Running command:\n", cmd.String())
 
 	// Install a specific `solc` version if requested in the config
 	if c.SolcVersion != "" {
-		if !c.SkipSolcInstall{
+		if !c.SkipSolcInstall {
 			out, err := exec.Command("solc-select", "install", c.SolcVersion).CombinedOutput()
 			if err != nil {
 				return nil, "", fmt.Errorf("error while executing `solc-select install`:\nOUTPUT:\n%s\nERROR: %s\n", string(out), err.Error())

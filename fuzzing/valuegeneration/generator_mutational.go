@@ -380,10 +380,10 @@ func (g *MutationalValueGenerator) mutateStringInternal(s *string) string {
 // GenerateAddress obtains an existing address from its underlying value set or generates a random one.
 func (g *MutationalValueGenerator) GenerateAddress() common.Address {
 	// If our bias directs us to, use the random generator instead
-	randomGeneratorDecision := g.randomProvider.Float32()
-	if randomGeneratorDecision < g.config.GenerateRandomAddressBias {
-		return g.RandomValueGenerator.GenerateAddress()
-	}
+	// randomGeneratorDecision := g.randomProvider.Float32()
+	// if randomGeneratorDecision < g.config.GenerateRandomAddressBias {
+	// 	return g.RandomValueGenerator.GenerateAddress()
+	// }
 
 	// Obtain our addresses from our value set. If we have none, generate a random one instead.
 	addresses := g.valueSet.Addresses()
