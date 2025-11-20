@@ -488,12 +488,28 @@ func (t *AssertionTestCaseProvider) getFalsePositivePCs(contractName string, pcs
 		return fpPCs
 	}
 
-	// Find source path for the contract
-	sourcePath := ""
-	for _, contract := range t.fuzzer.ContractDefinitions() {
-		if contract.Name() == contractName {
-			sourcePath = contract.SourcePath()
-			break
+	// Retrieve etherscan flag and target from platform config
+	var etherscanFlag bool
+	var target string
+	if platformConfig, err := t.fuzzer.config.Compilation.GetPlatformConfig(); err == nil {
+		if cryticConfig, ok := platformConfig.(*platforms.CryticCompilationConfig); ok {
+			etherscanFlag = cryticConfig.EtherscanJsonFile
+			target = cryticConfig.Target
+
+		}
+	}
+
+	// Determine source path based on etherscan flag
+	var sourcePath string
+	if etherscanFlag {
+		sourcePath = target
+	} else {
+		// Find source path for the contract
+		for _, contract := range t.fuzzer.ContractDefinitions() {
+			if contract.Name() == contractName {
+				sourcePath = contract.SourcePath()
+				break
+			}
 		}
 	}
 
