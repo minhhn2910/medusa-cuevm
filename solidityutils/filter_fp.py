@@ -44,7 +44,7 @@ def is_false_positive_pc(pc: int, bug_type: int, contract_name: str, ast) -> boo
         linenums = frag["linenums"]
 
         print(
-            f"CuEVM Debug: PC={pc}, Type={BUG_TYPE_NAMES.get(bug_type, bug_type)}, Fragment='{fragment}'",
+            f"CuEVM Debug: PC={pc}, Type={BUG_TYPE_NAMES.get(bug_type, bug_type)}, Fragment='{fragment}' fagmentsourcepath={frag['sourcepath']}",
             file=sys.stderr,
         )
 
@@ -61,15 +61,15 @@ def is_false_positive_pc(pc: int, bug_type: int, contract_name: str, ast) -> boo
         # Filter based on bug type and fragment content
         if bug_type == CuEVM_INTEGER_ADD:
             # ADD bug should have + or add in fragment
-            if "+" not in fragment and "add" not in fragment.lower():
+            if "+" not in fragment and "add(" not in fragment:
                 return True
         elif bug_type == CuEVM_INTEGER_SUB:
             # SUB bug should have - or sub in fragment
-            if "-" not in fragment and "sub" not in fragment.lower():
+            if "-" not in fragment and "sub(" not in fragment:
                 return True
         elif bug_type == CuEVM_INTEGER_MUL:
             # MUL bug should have * or mul in fragment
-            if "*" not in fragment and "mul" not in fragment.lower():
+            if "*" not in fragment and "mul(" not in fragment:
                 return True
         else:
             # For generic INTEGER_BUG, check for any arithmetic operator

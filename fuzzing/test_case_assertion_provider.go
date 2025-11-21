@@ -475,6 +475,15 @@ func (t *AssertionTestCaseProvider) getFalsePositivePCs(contractName string, bug
 		return fpPCs
 	}
 
+	// Helper to mark all bugs as false positives (conservative fallback)
+	allBugsAsFP := func() map[uint32]bool {
+		result := make(map[uint32]bool)
+		for _, bug := range bugs {
+			result[bug.pc] = true
+		}
+		return result
+	}
+
 	// Retrieve etherscan flag and target from platform config
 	var etherscanFlag bool
 	var target string
@@ -493,6 +502,7 @@ func (t *AssertionTestCaseProvider) getFalsePositivePCs(contractName string, bug
 	} else {
 		// Find source path for the contract
 		for _, contract := range t.fuzzer.ContractDefinitions() {
+
 			if contract.Name() == contractName {
 				sourcePath = contract.SourcePath()
 				break
@@ -502,7 +512,7 @@ func (t *AssertionTestCaseProvider) getFalsePositivePCs(contractName string, bug
 
 	if sourcePath == "" {
 		fmt.Println("CuEVM Debug: no source path found", contractName)
-		return fpPCs // No source path found
+		return allBugsAsFP()
 	}
 
 	// Find script path
@@ -515,7 +525,7 @@ func (t *AssertionTestCaseProvider) getFalsePositivePCs(contractName string, bug
 		scriptPath = "solidityutils/filter_fp.py"
 		if _, err := os.Stat(scriptPath); os.IsNotExist(err) {
 			fmt.Println("CuEVM Debug: script not found", scriptPath)
-			return fpPCs // Script not found
+			return fpPCs
 		}
 	}
 
@@ -538,7 +548,8 @@ func (t *AssertionTestCaseProvider) getFalsePositivePCs(contractName string, bug
 	output, err := cmd.Output()
 	fmt.Println("CuEVM Debug: output", string(output))
 	if err != nil {
-		return fpPCs // Script failed
+		fmt.Println("CuEVM Debug: error executing script", err)
+		return allBugsAsFP()
 	}
 
 	// Parse output - space-separated list of false positive PCs
