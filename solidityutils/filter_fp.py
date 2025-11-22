@@ -35,18 +35,15 @@ BUG_TYPE_NAMES = {
 
 def is_false_positive_pc(pc: int, bug_type: int, contract_name: str, ast) -> bool:
     """Check if a PC represents a false positive arithmetic bug based on bug type."""
+    # print(f"CuEVM Debug: pc={pc}, bug_type={bug_type}, contract_name={contract_name}")
     try:
+        # print(f"CuEVM Debug: pc={pc}")
         if pc <= 0:
             return True  # Contract-level or invalid PC
 
         frag = ast.source_by_pc(contract_name, pc, deploy=False)
         fragment = frag["fragment"].strip()
         linenums = frag["linenums"]
-
-        print(
-            f"CuEVM Debug: PC={pc}, Type={BUG_TYPE_NAMES.get(bug_type, bug_type)}, Fragment='{fragment}' fagmentsourcepath={frag['sourcepath']}",
-            file=sys.stderr,
-        )
 
         # Calculate line span
         if len(linenums) == 2:
@@ -57,7 +54,7 @@ def is_false_positive_pc(pc: int, bug_type: int, contract_name: str, ast) -> boo
         # Filter multi-line spans (likely function/contract definitions)
         if line_span >= 3:
             return True
-        print(f"CuEVM Debug: fragment={fragment}", bug_type)
+        # print(f"CuEVM Debug: fragment={fragment}", bug_type)
         # Filter based on bug type and fragment content
         if bug_type == CuEVM_INTEGER_ADD:
             # ADD bug should have + or add in fragment
@@ -76,10 +73,11 @@ def is_false_positive_pc(pc: int, bug_type: int, contract_name: str, ast) -> boo
             if "+" not in fragment and "-" not in fragment and "*" not in fragment:
                 return True
 
-        print(f"CuEVM Integer bug found: PC={pc}, type={bug_type}, fragment={fragment}")
+        # print(f"CuEVM Integer bug found: PC={pc}, type={bug_type}, fragment={fragment}")
         return False
 
     except Exception:
+        print(f"CuEVM Debug: Exception")
         return True  # If we can't analyze, assume it's a false positive
 
 
@@ -122,7 +120,7 @@ def main():
         print(" ".join(false_positive_pcs))
 
     except Exception:
-        print(f"CuEVM Debug: Exception {sys.exc_info()}", file=sys.stderr)
+        print(f"CuEVM Debug: Exception {sys.exc_info()}")
         # If analysis fails, return all PCs (all false positives detected)
         print(" ".join(str(pc) for pc, _ in bugs))
 
