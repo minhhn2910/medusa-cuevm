@@ -5,6 +5,7 @@ import (
 	"math/big"
 	"math/rand"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/crytic/medusa/logging/colors"
@@ -102,6 +103,7 @@ type FuzzerWorker struct {
 	staticABIDataABIValues     map[string]calls.CallMessageDataAbiValues
 	staticABIMarkerOffsetCache map[string]int
 	signatureToMethodMap       map[string]*fuzzerTypes.DeployedContractMethod
+	sigHasBytesCache           map[string]bool // cache for arbitrary call FP filtering
 }
 
 // newFuzzerWorker creates a new FuzzerWorker, assigning it the provided worker index/id and associating it to the
@@ -148,6 +150,11 @@ func newFuzzerWorker(fuzzer *Fuzzer, workerIndex int, randomProvider *rand.Rand)
 	return worker, nil
 }
 
+// hasDynamicBytes checks if a signature contains dynamic bytes type (not bytes32, etc.)
+func hasDynamicBytes(sig string) bool {
+	return strings.Contains(sig, "bytes,") || strings.Contains(sig, "bytes)") || strings.Contains(sig, "bytes[")
+}
+
 func (fw *FuzzerWorker) initializeABICache() {
 	// fmt.Println("CuEVM Debug: constructing staticABICallElementCache")
 
@@ -171,6 +178,15 @@ func (fw *FuzzerWorker) initializeABICache() {
 	for _, method := range fw.pureMethods {
 		fw.signatureToMethodMap[method.Method.Sig] = &method
 	}
+
+	// Build cache for arbitrary call FP filtering (sig -> has dynamic bytes)
+	fw.sigHasBytesCache = make(map[string]bool)
+	for _, method := range fw.stateChangingMethods {
+		fw.sigHasBytesCache[method.Method.Sig] = hasDynamicBytes(method.Method.Sig)
+	}
+	// for _, method := range fw.pureMethods {
+	// 	fw.sigHasBytesCache[method.Method.Sig] = hasDynamicBytes(method.Method.Sig)
+	// }
 
 	// Pre-allocate callSequenceElements for reuse
 	fw.callSequenceElements = make([][]*calls.CallSequenceElement, fw.fuzzer.sequencesPerCPUWorker)

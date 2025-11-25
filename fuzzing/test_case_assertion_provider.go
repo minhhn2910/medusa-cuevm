@@ -418,9 +418,22 @@ func (t *AssertionTestCaseProvider) GPUPostCallTest(workers []*FuzzerWorker, gpu
 			// general bugs including assertion failure, to be exported to json later
 			{
 				bug_id := rawPC<<16 | bugType<<8 | (bugContractId & 0xFF)
+				// fmt.Println("Bug Raw PC", rawPC, "Bug Type", bugType, "Bug Contract ID", bugContractId)
 				// fmt.Println("CuEVM Debug: bug_id", hex.EncodeToString(big.NewInt(int64(bug_id)).Bytes()))
 				if _, exists := t.generalBugs[bug_id]; exists {
 					continue
+				}
+				// Filter false positive for arbitrary call: skip if method has no dynamic bytes input
+				if bugType == CuEVM_ARBITRARY_CALL {
+					if hasBytesInput, ok := workers[workerIdx].sigHasBytesCache[lastCallMethod.Sig]; !ok || !hasBytesInput {
+						continue
+					}
+				}
+				contractName := t.fuzzer.contractIdToName[bugContractId]
+				if contractName == "" {
+					if bugType == CuEVM_INTEGER_ADD || bugType == CuEVM_INTEGER_SUB || bugType == CuEVM_INTEGER_MUL {
+						continue
+					}
 				}
 				// RegisterTestCase registers a new TestCase with the Fuzzer.
 				testCase := &AssertionTestCase{
@@ -509,7 +522,7 @@ func (t *AssertionTestCaseProvider) getFalsePositivePCs(contractName string, bug
 			}
 		}
 	}
-
+	// fmt.Println("CuEVM Debug: sourcePath", sourcePath)
 	if sourcePath == "" {
 		fmt.Println("CuEVM Debug: no source path found", contractName)
 		return allBugsAsFP()
@@ -552,9 +565,15 @@ func (t *AssertionTestCaseProvider) getFalsePositivePCs(contractName string, bug
 		return allBugsAsFP()
 	}
 
-	// Parse output - space-separated list of false positive PCs
-	outputStr := strings.TrimSpace(string(output))
+	// Parse output - space-separated list of false positive PCs (get only last line of output)
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	outputStr := ""
+	if len(lines) > 0 {
+		outputStr = strings.TrimSpace(lines[len(lines)-1])
+	}
+	// fmt.Println("CuEVM Debug: outputStr", outputStr)
 	if outputStr == "" {
+		// fmt.Println("CuEVM Debug: no false positives found")
 		return fpPCs // No false positives
 	}
 
@@ -623,7 +642,7 @@ func (t *AssertionTestCaseProvider) processFalsePositives() {
 	// Process each contract's bugs in batch
 	for contractName, bugs := range contractBugs {
 		fpPCs := t.getFalsePositivePCs(contractName, bugs)
-
+		// fmt.Println("CuEVM Debug: fpPCs", fpPCs)
 		// Move false positive bugs to separate map
 		for pc := range fpPCs {
 			if bug_id, exists := bugIdMap[contractName][pc]; exists {

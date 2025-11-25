@@ -1295,7 +1295,7 @@ func (f *Fuzzer) spawnWorkersLoop(baseTestChain *chain.TestChain) error {
 
 		f.loopCounter++
 
-		// if f.loopCounter == 1 {
+		// if f.loopCounter == 2 {
 		// 	working = false
 		// }
 		// CuEVM Debug

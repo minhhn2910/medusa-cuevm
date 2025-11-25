@@ -842,7 +842,7 @@ func (g *CallSequenceGenerator) generateNewElementWithMutationMask(candidate_poo
 		masks = nil
 		msg.DataMarkers = nil
 	} else {
-		// fmt.Println("CuEVM Debug: dynamic ABI method")
+		// fmt.Println("CuEVM Debug: dynamic ABI method \n\n", selectedMethod.Method.Sig)
 		// Generate fuzzed parameters for the function call
 		args := make([]any, len(selectedMethod.Method.Inputs))
 		g.generatedArrayLengths = make([]int, 0)
