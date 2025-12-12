@@ -44,7 +44,7 @@ def is_false_positive_pc(pc: int, bug_type: int, contract_name: str, ast) -> boo
         frag = ast.source_by_pc(contract_name, pc, deploy=False)
         fragment = frag["fragment"].strip()
         linenums = frag["linenums"]
-
+        print(f"CuEVM Debug: pc {pc} frag {frag}")
         # Calculate line span
         if len(linenums) == 2:
             line_span = linenums[1] - linenums[0]
@@ -56,26 +56,39 @@ def is_false_positive_pc(pc: int, bug_type: int, contract_name: str, ast) -> boo
             return True
         # print(f"CuEVM Debug: fragment={fragment}", bug_type)
         # Filter based on bug type and fragment content
+        # Determine if this is a yul or solidity source
+        is_yul = "#utility.yul" in frag.get("source_path", "")
+        if is_yul:
+            return True
+        # Check if fragment contains expected operator for bug type
         if bug_type == CuEVM_INTEGER_ADD:
-            # ADD bug should have + or add in fragment
-            if "+" not in fragment and "add(" not in fragment:
+            expected_op = "+"
+            excluded_op = "++"
+            if expected_op not in fragment or excluded_op in fragment:
                 return True
+
         elif bug_type == CuEVM_INTEGER_SUB:
-            # SUB bug should have - or sub in fragment
-            if "-" not in fragment and "sub(" not in fragment:
+            expected_op = "-"
+            excluded_op = "--"
+            print(f"CuEVM Debug: bug_type {bug_type} fragment={fragment}, expected_op={expected_op}")
+            if expected_op not in fragment or excluded_op in fragment:
                 return True
+
         elif bug_type == CuEVM_INTEGER_MUL:
-            # MUL bug should have * or mul in fragment
-            if "*" not in fragment and "mul(" not in fragment:
+            expected_op = "*"
+            excluded_op = "**"
+            print(f"CuEVM Debug: bug_type {bug_type} fragment={fragment}, expected_op={expected_op}, is_yul={is_yul}")
+            if expected_op not in fragment or excluded_op in fragment:
                 return True
+
         else:
             # For generic INTEGER_BUG, check for any arithmetic operator
-            if "+" not in fragment and "-" not in fragment and "*" not in fragment:
+            has_arithmetic = any(op in fragment for op in ["+", "-", "*"])
+            if not has_arithmetic:
                 return True
 
-        # print(f"CuEVM Integer bug found: PC={pc}, type={bug_type}, fragment={fragment}")
+        print("Bug found: PC={pc}, type={bug_type}, fragment={fragment}")
         return False
-
     except Exception:
         print(f"CuEVM Debug: Exception")
         return True  # If we can't analyze, assume it's a false positive

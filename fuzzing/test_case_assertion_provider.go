@@ -418,8 +418,7 @@ func (t *AssertionTestCaseProvider) GPUPostCallTest(workers []*FuzzerWorker, gpu
 			// general bugs including assertion failure, to be exported to json later
 			{
 				bug_id := rawPC<<16 | bugType<<8 | (bugContractId & 0xFF)
-				// fmt.Println("Bug Raw PC", rawPC, "Bug Type", bugType, "Bug Contract ID", bugContractId)
-				// fmt.Println("CuEVM Debug: bug_id", hex.EncodeToString(big.NewInt(int64(bug_id)).Bytes()))
+				// fmt.Println("Bug Raw PC", rawPC, "Bug Type", bugType, "Bug Contract ID", bugContractId, "fuzzer target contract id", t.fuzzer.targetContractId)
 				if _, exists := t.generalBugs[bug_id]; exists {
 					continue
 				}
@@ -429,8 +428,7 @@ func (t *AssertionTestCaseProvider) GPUPostCallTest(workers []*FuzzerWorker, gpu
 						continue
 					}
 				}
-				contractName := t.fuzzer.contractIdToName[bugContractId]
-				if contractName == "" {
+				if bugContractId != t.fuzzer.targetContractId {
 					if bugType == CuEVM_INTEGER_ADD || bugType == CuEVM_INTEGER_SUB || bugType == CuEVM_INTEGER_MUL {
 						continue
 					}
@@ -442,7 +440,7 @@ func (t *AssertionTestCaseProvider) GPUPostCallTest(workers []*FuzzerWorker, gpu
 					targetMethod:    *lastCallMethod,
 					bugType:         bugType,
 					bugPC:           rawPC,
-					bugContractName: t.fuzzer.contractIdToName[bugContractId],
+					bugContractName: t.fuzzer.targetContractName,
 					callSequence:    &fullSequence,
 					bugTime:         time.Since(t.fuzzer.fuzzStartTime).Seconds(), // seconds
 				}
