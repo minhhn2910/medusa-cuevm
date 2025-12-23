@@ -428,6 +428,33 @@ func (t *AssertionTestCaseProvider) GPUPostCallTest(workers []*FuzzerWorker, gpu
 						continue
 					}
 				}
+				if bugType == CuEVM_LEAKING_ETHER || bugType == CuEVM_REENTRANCY {
+
+					has_deployer_action := false
+					for i := 0; i < len(fullSequence); i++ {
+						method, err := fullSequence[i].Method()
+						if err != nil {
+							fmt.Println("CuEVM Debug: method error", err)
+							continue
+						}
+						methodSigStr := strings.ToLower(method.Sig)
+						if strings.HasPrefix(methodSigStr, "initialize") {
+							has_deployer_action = true
+							break
+						}
+						if fullSequence[i].Call.From == t.fuzzer.DeployerAddress() {
+							if strings.HasPrefix(methodSigStr, "change") || strings.HasPrefix(methodSigStr, "set") || strings.HasPrefix(methodSigStr, "init") {
+								has_deployer_action = true
+								// fmt.Println("CuEVM Debug: has_deployer_action", has_deployer_action)
+								break
+							}
+						}
+					}
+					if has_deployer_action {
+						// treat as false positive
+						continue
+					}
+				}
 				if bugContractId != t.fuzzer.targetContractId {
 					if bugType == CuEVM_INTEGER_ADD || bugType == CuEVM_INTEGER_SUB || bugType == CuEVM_INTEGER_MUL {
 						continue

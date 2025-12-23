@@ -1,6 +1,7 @@
 package types
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -137,9 +138,14 @@ func (s *SlitherConfig) RunSlither(target string, isEtherScan bool) (*SlitherRes
 		if isEtherScan {
 			args = append(args, "--compile-force-framework", "etherscan", "--etherscan-json-file", target)
 		}
-		fmt.Println("CuEVM Debug: args", args)
+		// fmt.Println("CuEVM Debug: args", args)
+
+		// Create a context with timeout (3 seconds)
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+
 		// Log the command
-		cmd := exec.Command("slither", args...)
+		cmd := exec.CommandContext(ctx, "slither", args...)
 		logging.GlobalLogger.Info("Running Slither:\n", cmd.String())
 
 		// Run slither
@@ -148,6 +154,10 @@ func (s *SlitherConfig) RunSlither(target string, isEtherScan bool) (*SlitherRes
 		// fmt.Printf("CuEVM Debug: out: %s\n", out)
 		// fmt.Printf("CuEVM Debug: err: %s\n", err)
 		if err != nil {
+			// Check if the error is due to context timeout
+			if ctx.Err() == context.DeadlineExceeded {
+				return nil, fmt.Errorf("slither command timed out after 3 seconds")
+			}
 			return nil, err
 		}
 		logging.GlobalLogger.Info("Finished running Slither in ", time.Since(start).Round(time.Second))
