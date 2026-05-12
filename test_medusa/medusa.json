@@ -1,11 +1,11 @@
 {
   "fuzzing": {
-    "CpuWorkers": 16,
+    "CpuWorkers": 8,
     "GpuWorkers": 32768,
     "workerResetLimit": 50,
     "timeout": 10,
     "testLimit": 10000,
-    "callSequenceLength": 1,
+    "callSequenceLength": 2,
     "corpusDirectory": "",
     "coverageEnabled": true,
     "targetContracts": ["Test"],
@@ -64,6 +64,7 @@
       "target": "test.sol",
       "solcVersion": "0.7.6",
       "exportDirectory": "",
+      "skipSolcInstall": true,
       "args": []
     }
   },

@@ -1,3 +1,21 @@
+# Medusa-cuevm
+The integration of CuEVM to Medusa 1.2.1. Beyond medusa `assertion` bug type, it supports more common bug type (Integer Overflow, Leaking Ether, Reentrancy) with the oracles written inside CuEVM. 
+
+Extra features:
+- Source line mapping to report bugs in solidity line number. Achieved by our [solc-json-parser](https://github.com/sbip-sg/solc-json-parser)
+- Simple false positve reduction by pattern matching in solidity source.
+- Extra flags for configuring `gpuWorkers`, `cpuWorkers`, `callSequenceLength`, `skipSolcInstall`, `etherscanJsonFile`. 
+
+>The most important flags are cpu workers (> CPU 8 threads) and gpu workers (> 32768 GPU threads, depending on GPU memory).
+
+`callSequenceLength` is the maximum transaction sequence length (how many transactions before the state reset). Higher `callSequenceLength` can discover bugs that requires multiple transactions to trigger at the cost of extra GPU memory. It is recommended to be at `8-10`.
+
+The tool is dependent on CuEVM library, to build it you first need to build CuEVM and use the `./scripts/build.sh` with appropriate `CUEVM_HOME` set. For example: 
+> CUEVM_HOME=/data/CuEVM ./scripts/build.sh`
+
+Below is the original README file.
+
+---
 # medusa
 
 `medusa` is a cross-platform [go-ethereum](https://github.com/ethereum/go-ethereum/)-based smart contract fuzzer inspired by [Echidna](https://github.com/crytic/echidna).
