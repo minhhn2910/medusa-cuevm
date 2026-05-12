@@ -2,9 +2,10 @@ package fuzzing
 
 import (
 	"fmt"
-	"github.com/crytic/medusa/fuzzing/config"
 	"math/big"
 	"sync"
+
+	"github.com/crytic/medusa/fuzzing/config"
 
 	"github.com/crytic/medusa-geth/core"
 	"github.com/crytic/medusa/fuzzing/calls"
@@ -135,7 +136,7 @@ func (t *OptimizationTestCaseProvider) runOptimizationTest(worker *FuzzerWorker,
 func (t *OptimizationTestCaseProvider) onFuzzerStarting(event FuzzerStartingEvent) error {
 	// Reset our state
 	t.testCases = make(map[contracts.ContractMethodID]*OptimizationTestCase)
-	t.workerStates = make([]optimizationTestCaseProviderWorkerState, t.fuzzer.Config().Fuzzing.Workers)
+	t.workerStates = make([]optimizationTestCaseProviderWorkerState, t.fuzzer.Config().Fuzzing.CpuWorkers)
 
 	// Create a test case for every optimization test method.
 	for _, contract := range t.fuzzer.ContractDefinitions() {

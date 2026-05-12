@@ -27,6 +27,9 @@ const (
 	CuEVM_LEAKING_ETHER      = 0x03
 	CuEVM_ARBITRARY_CALL     = 0x04
 	CuEVM_REENTRANCY         = 0x05
+	CuEVM_INTEGER_ADD        = 0x11
+	CuEVM_INTEGER_SUB        = 0x12
+	CuEVM_INTEGER_MUL        = 0x13
 )
 
 // bugTypeName returns a human-readable name for the bug type
@@ -34,7 +37,7 @@ func bugTypeName(bugType uint32) string {
 	switch bugType {
 	case CuEVM_ASSERTION_BUG_TYPE:
 		return "Assertion Failure"
-	case CuEVM_INTEGER_BUG:
+	case CuEVM_INTEGER_BUG, CuEVM_INTEGER_ADD, CuEVM_INTEGER_SUB, CuEVM_INTEGER_MUL:
 		return "Integer Overflow"
 	case CuEVM_SELF_DESTRUCT:
 		return "Self Destruct"

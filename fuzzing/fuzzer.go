@@ -207,8 +207,10 @@ type Fuzzer struct {
 	lastPCsLogMsg time.Time
 
 	// contractCodeHashToName maps contract code hashes to their names for quick lookup
-	contractCodeHashToName map[common.Hash]string
-	contractIdToName       map[uint32]string
+	// contractCodeHashToName map[common.Hash]string
+	// contractIdToName       map[uint32]string
+	targetContractId   uint32
+	targetContractName string
 	// CuEVM: CPU workers is fixed to number of threads
 	numCPUWorkers         int
 	sequencesPerCPUWorker int
@@ -343,19 +345,19 @@ func NewFuzzer(config config.ProjectConfig) (*Fuzzer, error) {
 
 	// Create and return our fuzzing instance.
 	fuzzer := &Fuzzer{
-		config:                 config,
-		senders:                senders,
-		deployer:               deployer,
-		baseValueSet:           valuegeneration.NewValueSet(),
-		contractDefinitions:    make(fuzzerTypes.Contracts, 0),
-		testCases:              make([]TestCase, 0),
-		testCasesFinished:      make(map[string]TestCase),
-		contractCodeHashToName: make(map[common.Hash]string),
-		contractIdToName:       make(map[uint32]string),
-		sendersIndexMap:        make(map[common.Address]uint8),
-		fuzableReturnAddress:   make(map[common.Address]bool),
-		storageSlotAccessed:    make(map[uint32]bool),
-		revertReporter:         revertReporter,
+		config:              config,
+		senders:             senders,
+		deployer:            deployer,
+		baseValueSet:        valuegeneration.NewValueSet(),
+		contractDefinitions: make(fuzzerTypes.Contracts, 0),
+		testCases:           make([]TestCase, 0),
+		testCasesFinished:   make(map[string]TestCase),
+		// contractCodeHashToName: make(map[common.Hash]string),
+		// contractIdToName:       make(map[uint32]string),
+		sendersIndexMap:      make(map[common.Address]uint8),
+		fuzableReturnAddress: make(map[common.Address]bool),
+		storageSlotAccessed:  make(map[uint32]bool),
+		revertReporter:       revertReporter,
 		Hooks: FuzzerHooks{
 			NewCallSequenceGeneratorConfigFunc: defaultCallSequenceGeneratorConfigFunc,
 			NewShrinkingValueMutatorFunc:       defaultShrinkingValueMutatorFunc,
@@ -839,6 +841,9 @@ func chainSetupFromCompilations(fuzzer *Fuzzer, testChain *chain.TestChain) (*ex
 			}
 		}
 	}
+
+	// get target contract name for bug reporting
+	fuzzer.targetContractName = fuzzer.config.Fuzzing.TargetContracts[0]
 
 	// Concatenate the predeployed contracts and target contracts
 	// Ordering is important here (predeploys _then_ targets) so that you can have the same contract in both lists
@@ -1940,7 +1945,7 @@ func (f *Fuzzer) runTransactionsGPU(workers []*FuzzerWorker, txBatchSize, sequen
 func (f *Fuzzer) prepareAndProcessChainStateInGPU(testChain *chain.TestChain) error {
 	if f.GPUchainInitiated {
 		fmt.Println("\n\n GPU chain already initiated, skipping JSON dump state\n\n")
-		result := C.process_json_state_gpu(nil, C.uint(f.config.Fuzzing.Workers), true, C.uint(f.skipSequenceSize), nil, nil, 0)
+		result := C.process_json_state_gpu(nil, C.uint(f.config.Fuzzing.GpuWorkers), true, C.uint(f.skipSequenceSize), nil, nil, 0)
 		if result != 0 {
 			return fmt.Errorf("C++ GPU state processing returned error code: %d", result)
 		}
@@ -1954,10 +1959,16 @@ func (f *Fuzzer) prepareAndProcessChainStateInGPU(testChain *chain.TestChain) er
 		var codeHash common.Hash
 
 		codeHash = crypto.Keccak256Hash(code)
-		f.contractCodeHashToName[codeHash] = contract.Name()
+		// f.contractCodeHashToName[codeHash] = contract.Name()
 		fmt.Printf("  Contract %s - code hash: %s\n",
 			contract.Name(), codeHash.Hex())
 	}
+
+	targetAddress := f.deployedContractAddr[f.targetContractName]
+	lastByteHex := targetAddress.Hex()[len(targetAddress.Hex())-2:]
+	lastByteInt, _ := strconv.ParseInt(lastByteHex, 16, 32)
+	f.targetContractId = uint32(lastByteInt)
+	fmt.Println("CuEVM Debug: target contract id", f.targetContractId)
 
 	fmt.Println("========================================================")
 
@@ -2061,7 +2072,7 @@ func (f *Fuzzer) prepareAndProcessChainStateInGPU(testChain *chain.TestChain) er
 	// }
 
 	// CuEVM debug June 27, change the num_instances calculation
-	result := C.process_json_state_gpu(cJSON, C.uint(f.config.Fuzzing.Workers*f.skipSequenceSize), false, C.uint(f.skipSequenceSize), constantJSON,
+	result := C.process_json_state_gpu(cJSON, C.uint(f.config.Fuzzing.GpuWorkers*f.skipSequenceSize), false, C.uint(f.skipSequenceSize), constantJSON,
 		cFlattenedMarkers,
 		C.uint(len(f.staticABIFlattenedMarkers)),
 	)
@@ -2118,21 +2129,21 @@ func (f *Fuzzer) convertStateToJSON(stateDump *ethstate.Dump, blockHeader *types
 			if len(account.Code) > 0 {
 
 				accountMap["code"] = "0x" + hex.EncodeToString(account.Code)
-				// get the code hash
-				codeHash := crypto.Keccak256Hash(account.Code)
-				contractName, ok := f.contractCodeHashToName[codeHash]
-				if ok {
-					// fmt.Println("CuEVM Debug: contractName", contractName)
-					accountMap["contractName"] = contractName
-					if len(addrStr) >= 4 { // Need at least "0x" + 2 hex chars
-						lastByteHex := addrStr[len(addrStr)-2:]
-						lastByteInt, _ := strconv.ParseInt(lastByteHex, 16, 32)
-						f.contractIdToName[uint32(lastByteInt)] = contractName
-					}
 
-				} else {
-					// fmt.Println("CuEVM Debug: contractName not found for code hash", codeHash.Hex())
-				}
+				// get the code hash
+				// codeHash := crypto.Keccak256Hash(account.Code)
+
+				// // contractName, ok := f.contractCodeHashToName[codeHash]
+				// if ok {
+				// 	fmt.Println("CuEVM Debug: contract code hash", codeHash.Hex(), "contractName", contractName)
+				// 	accountMap["contractName"] = contractName
+				// 	if len(addrStr) >= 4 { // Need at least "0x" + 2 hex chars
+
+				// 	}
+
+				// } else {
+				// 	// fmt.Println("CuEVM Debug: contractName not found for code hash", codeHash.Hex())
+				// }
 
 			} else {
 				accountMap["code"] = "0x"
@@ -2625,20 +2636,34 @@ func (f *Fuzzer) Start() error {
 	// CuEVM Debug: fixed random provider
 	f.randomProvider = rand.New(rand.NewSource(1))
 
-	// CuEVM Debug: fixed number of CPU workers
-	f.numCPUWorkers = runtime.NumCPU()
+	// Initialize CPU and GPU worker counts from configuration with defaults
+	// Default CPU workers to number of available CPU cores if not configured
+	if f.config.Fuzzing.CpuWorkers <= 0 {
+		f.numCPUWorkers = runtime.NumCPU()
+	} else {
+		f.numCPUWorkers = f.config.Fuzzing.CpuWorkers
+	}
+
+	// Default GPU workers to 32768 if not configured
+	if f.config.Fuzzing.GpuWorkers <= 0 {
+		f.config.Fuzzing.GpuWorkers = 32768
+	}
+
+	// GPU chain initialization flag
 	f.GPUchainInitiated = false
-	rawSequencesPerWorker := (f.config.Fuzzing.Workers / f.skipSequenceSize) / f.numCPUWorkers
 
-	// Round up to next multiple of skipSequenceSize
+	// Calculate sequences per CPU worker, ensuring divisibility
+	// Start with raw calculation based on GPU workers and skip size
+	rawSequencesPerWorker := (f.config.Fuzzing.GpuWorkers / f.skipSequenceSize) / f.numCPUWorkers
+
+	// Ensure at least 1 sequence per worker to avoid zero division
 	roundedSequencesPerWorker := max(1, rawSequencesPerWorker)
-	// roundedSequencesPerWorker := max(f.skipSequenceSize, ((rawSequencesPerWorker+f.skipSequenceSize-1)/f.skipSequenceSize)*f.skipSequenceSize)
 
-	// Update total workers to ensure proper division
-	f.config.Fuzzing.Workers = roundedSequencesPerWorker * f.numCPUWorkers
+	// Update GPU workers to maintain proper division across CPU workers
+	f.config.Fuzzing.GpuWorkers = roundedSequencesPerWorker * f.numCPUWorkers
 
-	// Now this will be divisible by skipSequenceSize
-	f.sequencesPerCPUWorker = f.config.Fuzzing.Workers / f.numCPUWorkers
+	// Final sequences per CPU worker (guaranteed to be divisible)
+	f.sequencesPerCPUWorker = f.config.Fuzzing.GpuWorkers / f.numCPUWorkers
 
 	// Size the pre-allocated GPU arrays now that we know the dimensions
 	validCallCount := f.sequencesPerCPUWorker * f.numCPUWorkers * f.config.Fuzzing.CallSequenceLength

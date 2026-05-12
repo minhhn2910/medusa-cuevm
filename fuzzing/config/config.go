@@ -34,8 +34,14 @@ type ProjectConfig struct {
 
 // FuzzingConfig describes the configuration options used by the fuzzing.Fuzzer.
 type FuzzingConfig struct {
-	// Workers describes the amount of threads to use in fuzzing campaigns.
+	// CpuWorkers describes the amount of CPU threads to use in fuzzing campaigns. Default to be $(nproc)
+	CpuWorkers int `json:"cpuWorkers"`
+
+	// Backward compatibility with medusa. Default to be the same as CpuWorkers
 	Workers int `json:"workers"`
+
+	// GpuWorkers describes the amount of GPU threads to use in fuzzing campaigns. Default to be 32768 (rounded )
+	GpuWorkers int `json:"gpuWorkers"`
 
 	// WorkerResetLimit describes how many call sequences a worker should test before it is destroyed and recreated
 	// so that memory from its underlying chain is freed.
@@ -413,8 +419,12 @@ func (p *ProjectConfig) Validate() error {
 	}
 
 	// Verify the worker count is a positive number.
-	if p.Fuzzing.Workers <= 0 {
+	if p.Fuzzing.CpuWorkers <= 0 {
 		return errors.New("project configuration must specify a positive number for the worker count")
+	}
+
+	if p.Fuzzing.GpuWorkers <= 0 {
+		return errors.New("project configuration must specify a positive number for the GPU worker count")
 	}
 
 	// Verify that the sequence length is a positive number
