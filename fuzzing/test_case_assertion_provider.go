@@ -1,13 +1,23 @@
 package fuzzing
 
 import (
+	"fmt"
 	"math/big"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"sync"
+	"time"
 
+	"github.com/crytic/medusa-geth/common"
 	"github.com/crytic/medusa/compilation/abiutils"
+	"github.com/crytic/medusa/compilation/platforms"
 	"github.com/crytic/medusa/fuzzing/calls"
 	"github.com/crytic/medusa/fuzzing/config"
 	"github.com/crytic/medusa/fuzzing/contracts"
+	"github.com/crytic/medusa/fuzzing/coverage"
+	fuzzingutils "github.com/crytic/medusa/fuzzing/utils"
 
 	"golang.org/x/exp/slices"
 )
@@ -20,10 +30,17 @@ type AssertionTestCaseProvider struct {
 	fuzzer *Fuzzer
 
 	// testCases is a map of contract-method IDs to assertion test cases.GetContractMethodID
-	testCases map[contracts.ContractMethodID]*AssertionTestCase
-
+	testCases         map[contracts.ContractMethodID]*AssertionTestCase
+	generalBugs       map[uint32]*AssertionTestCase // bug_id -> bool if encountered before
+	falsePositiveBugs map[uint32]*AssertionTestCase // bug_id -> false positive bugs
 	// testCasesLock is used for thread-synchronization when updating testCases
 	testCasesLock sync.Mutex
+}
+
+// bugInfo holds PC and bug type information for false positive filtering
+type bugInfo struct {
+	pc      uint32
+	bugType uint32
 }
 
 // attachAssertionTestCaseProvider attaches a new AssertionTestCaseProvider to the Fuzzer and returns it.
@@ -66,6 +83,10 @@ func (t *AssertionTestCaseProvider) checkAssertionFailures(callSequence calls.Ca
 	// have a panic code.
 	lastExecutionResult := lastCall.ChainReference.MessageResults().ExecutionResult
 	panicCode := abiutils.GetSolidityPanicCode(lastExecutionResult.Err, lastExecutionResult.ReturnData, true)
+	// fmt.Printf("CuEVM debug: Assertion check - Error: %v, ReturnData: %v, PanicCode: %v\n",
+	// 	lastExecutionResult.Err,
+	// 	lastExecutionResult.ReturnData,
+	// 	panicCode)
 	failure := false
 	if panicCode != nil {
 		failure = encounteredAssertionFailure(panicCode.Uint64(), t.fuzzer.config.Fuzzing.Testing.AssertionTesting.PanicCodeConfig)
@@ -79,7 +100,8 @@ func (t *AssertionTestCaseProvider) checkAssertionFailures(callSequence calls.Ca
 func (t *AssertionTestCaseProvider) onFuzzerStarting(event FuzzerStartingEvent) error {
 	// Reset our state
 	t.testCases = make(map[contracts.ContractMethodID]*AssertionTestCase)
-
+	t.generalBugs = make(map[uint32]*AssertionTestCase)
+	t.falsePositiveBugs = make(map[uint32]*AssertionTestCase)
 	// Create a test case for every test method.
 	for _, contract := range t.fuzzer.ContractDefinitions() {
 		// If we're not testing all contracts, verify the current contract is one we specified in our target contracts
@@ -161,6 +183,7 @@ func (t *AssertionTestCaseProvider) onWorkerDeployedContractAdded(event FuzzerWo
 // and any underlying FuzzerWorker. It is called after every call made in a call sequence. It checks whether invariants
 // in methods to test are upheld after each call the Fuzzer makes when testing a call sequence.
 func (t *AssertionTestCaseProvider) callSequencePostCallTest(worker *FuzzerWorker, callSequence calls.CallSequence) ([]ShrinkCallSequenceRequest, error) {
+	// fmt.Println("CuEVM Debug: callSequencePostCallTest")
 	// Create a list of shrink call sequence verifiers, which we populate for each failed test we want a call sequence
 	// shrunk for.
 	shrinkRequests := make([]ShrinkCallSequenceRequest, 0)
@@ -175,7 +198,7 @@ func (t *AssertionTestCaseProvider) callSequencePostCallTest(worker *FuzzerWorke
 	t.testCasesLock.Lock()
 	testCase, testCaseExists := t.testCases[*methodId]
 	t.testCasesLock.Unlock()
-
+	// fmt.Println("CuEVM Debug: testCase", testCase, "testCaseExists", testCaseExists)
 	// Verify a test case exists for this method called (if we're not assertion testing this method, stop)
 	if !testCaseExists {
 		return shrinkRequests, nil
@@ -227,6 +250,434 @@ func (t *AssertionTestCaseProvider) callSequencePostCallTest(worker *FuzzerWorke
 	}
 
 	return shrinkRequests, nil
+}
+
+// GPUPostCallTest provides is a CallSequenceTestFunc that performs post-call testing logic for the attached Fuzzer
+// and any underlying FuzzerWorker. It is called after every call made in a call sequence. It checks whether invariants
+// in methods to test are upheld after each call the Fuzzer makes when testing a call sequence.
+func (t *AssertionTestCaseProvider) GPUPostCallTest(workers []*FuzzerWorker, gpuResult *coverage.GPUExecutionResult, markerOffsets []int32, bigIntWeightValue *big.Int) (bool, error) {
+
+	skipSequenceSize := t.fuzzer.skipSequenceSize
+	txBatchSizeCPU := t.fuzzer.sequencesPerCPUWorker * t.fuzzer.numCPUWorkers
+	txBatchSizeGPU := t.fuzzer.sequencesPerCPUWorker * t.fuzzer.numCPUWorkers * t.fuzzer.skipSequenceSize
+	total_bugs_encountered := 0
+	for batchIdx := 0; batchIdx < len(gpuResult.NewBugThreadIdx); batchIdx++ {
+		total_bugs_encountered += len(gpuResult.NewBugThreadIdx[batchIdx])
+		for idx := 0; idx < len(gpuResult.NewBugThreadIdx[batchIdx]); idx++ {
+			// translate from gpu idx to cpu idx (no skip sequence)
+			rawIdx := int(gpuResult.NewBugThreadIdx[batchIdx][idx]) / skipSequenceSize
+			rawPC := gpuResult.NewBugPCs[batchIdx][idx]
+			bugType := gpuResult.NewBugTypes[batchIdx][idx]
+			bugContractId := gpuResult.NewBugContractIds[batchIdx][idx]
+			workerIdx := rawIdx / t.fuzzer.sequencesPerCPUWorker
+			sequenceIdx := rawIdx % t.fuzzer.sequencesPerCPUWorker
+			elementIdx := batchIdx
+			fullSequence := make(calls.CallSequence, elementIdx+1)
+			for i := 0; i <= elementIdx; i++ {
+				fullSequence[i], _ = workers[workerIdx].callSequenceElements[sequenceIdx][i].Clone()
+				// fmt.Println("CuEVM Debug: fullSequence[i] original", hex.EncodeToString(fullSequence[i].Call.Data), "abi values", fullSequence[i].Call.DataAbiValues)
+				// Warning i is element index in a squence
+				// Need to reply i when reconstructing the sequence
+				markerOffsetIdx := (rawIdx + i*txBatchSizeCPU)
+				methodSig := fullSequence[i].Call.DataAbiValues.Method.Sig
+				// fmt.Println("CuEVM Debug: markerOffsetIdx", markerOffsetIdx, "methodSig", methodSig, "rawIdx", rawIdx, "i", i)
+				var dataMarkers []calls.DataMarker
+				if markerOffsets[markerOffsetIdx] < 0 {
+					dataMarkers = t.fuzzer.staticABIMarkers[t.fuzzer.staticABIMarkerIndexMap[methodSig]]
+				} else {
+					// fmt.Println("CuEVM Debug: markerOffsets[markerOffsetIdx] (sequenceIdx/f.skipSequenceSize)*f.skipSequenceSize", markerOffsets[markerOffsetIdx], "sequenceIdx", sequenceIdx, "i", i)
+					dataMarkers = workers[workerIdx].callSequenceElements[sequenceIdx][i].Call.DataMarkers
+				}
+				// fmt.Println("CuEVM Debug: dataMarkers", dataMarkers)
+				// fmt.Println("CuEVM Debug: fullSequence[i].Call.Data", hex.EncodeToString(fullSequence[i].Call.Data))
+				mutatedData, mutatedBlockNumber, mutatedBlockTimestamp, mutatedSenderIndex, mutatedValue := fuzzingutils.RestoreMutation(fullSequence[i].Call.Data, dataMarkers, int(gpuResult.NewBugThreadIdx[batchIdx][idx]), i, fuzzingutils.FuzzerConfig{
+					StartSeed:              t.fuzzer.currentRandomSeed,
+					BatchSize:              uint32(txBatchSizeGPU),
+					NumInstancesPerDevice:  t.fuzzer.numInstancesPerDevice,
+					AddressConstants:       t.fuzzer.addressConstants,
+					IntegerConstants:       t.fuzzer.integerConstants,
+					BlockNumberDelayMax:    60480 * 2, // hardcode for now
+					BlockTimestampDelayMax: 604800 * 4,
+					SenderCount:            uint32(len(t.fuzzer.senders)),
+					IsReentrancySender:     fullSequence[i].Call.From == common.HexToAddress(REENTRANCY_ATTACKER_ADDRESS),
+					IsRandomSender:         fullSequence[i].Call.From == common.HexToAddress(RANDOM_ATTACKER_ADDRESS),
+				})
+				// fmt.Println("CuEVM Debug: mutatedData", hex.EncodeToString(mutatedData))
+
+				// Apply mutated block values if they were changed (non-zero)
+				if i == 0 {
+					fullSequence[i].BlockNumberDelay = max(1, workers[workerIdx].callSequenceElements[sequenceIdx][0].BlockNumberDelay) + uint64(max(1, int64(mutatedBlockNumber))) - 1          // first block is 1
+					fullSequence[i].BlockTimestampDelay = max(1, workers[workerIdx].callSequenceElements[sequenceIdx][0].BlockTimestampDelay) + uint64(max(1, int64(mutatedBlockTimestamp))) - 1 // first block is 1
+				} else {
+					fullSequence[i].BlockNumberDelay = uint64(max(1, int64(mutatedBlockNumber)))
+					fullSequence[i].BlockTimestampDelay = uint64(max(1, int64(mutatedBlockTimestamp)))
+				}
+
+				if mutatedSenderIndex >= 0 {
+					fullSequence[i].Call.From = t.fuzzer.senders[mutatedSenderIndex]
+				}
+
+				// Apply mutated value if it was changed (non-zero)
+
+				fullSequence[i].Call.Value = mutatedValue
+				var inputValues []any
+				var err error
+				if len(mutatedData) >= 4 {
+					if fullSequence[i].Call.DataAbiValues.Method.Sig != "CuEVM::fallback()" {
+						inputData := mutatedData[4:] // skip the method ID
+						inputValues, err = fullSequence[i].Call.DataAbiValues.Method.Inputs.Unpack(inputData)
+					} else {
+						inputValues, err = fullSequence[i].Call.DataAbiValues.Method.Inputs.Unpack(mutatedData)
+					}
+
+					if err != nil {
+						fmt.Println("\n\nCuEVM Debug: inputValues unpack error\n\n", err)
+						// skip unpack if err occurs
+						err = nil
+					}
+				} else {
+					fmt.Println("CuEVM Debug: inputValues empty")
+					inputValues = []any{}
+				}
+
+				// fmt.Println("CuEVM debug original data ", hex.EncodeToString(fullSequence[i].Call.Data))
+				fullSequence[i].Call.DataAbiValues.InputValues = inputValues
+				fullSequence[i].Call.Data = mutatedData
+				// fmt.Println("CuEVM debug mutated data ", hex.EncodeToString(mutatedData))
+				// fmt.Println("CuEVM debug new inputValues", inputValues)
+				// fmt.Println("CuEVM debug mutated sender index", mutatedSenderIndex)
+				// fmt.Println("CuEVM debug mutated value", mutatedValue)
+				// fmt.Println("CuEVM debug mutated block number", mutatedBlockNumber)
+				// fmt.Println("CuEVM debug mutated block timestamp", mutatedBlockTimestamp)
+
+				// fmt.Println("Call element", fullSequence[i])
+			}
+			// workers[workerIdx].fuzzer.corpus.AddCallSequence(fullSequence, bigIntWeightValue)
+			lastCall := fullSequence[len(fullSequence)-1]
+			lastCallMethod, err := lastCall.Method()
+			if err != nil {
+				continue
+			}
+			// methodId := contracts.GetContractMethodID(lastCall.Contract, lastCallMethod)
+			/* Jul : temporarily disable native assertion bug type. To be used with general bugs
+			if bugType == CuEVM_ASSERTION_BUG_TYPE {
+				testFailed := encounteredAssertionFailure(1, t.fuzzer.config.Fuzzing.Testing.AssertionTesting.PanicCodeConfig)
+
+				t.testCasesLock.Lock()
+				testCase, testCaseExists := t.testCases[methodId]
+				t.testCasesLock.Unlock()
+				if err != nil {
+					continue
+				}
+				if !testCaseExists {
+					continue
+				}
+
+				if testCase.Status() == TestCaseStatusFailed {
+					continue
+				}
+				// if _, exists := bugPCsProcessed[rawPC]; exists {
+				// 	continue
+				// }
+
+				if testFailed {
+
+					// Create a request to shrink this call sequence.
+					shrinkRequest := ShrinkCallSequenceRequest{
+						TestName:             testCase.Name(),
+						CallSequenceToShrink: fullSequence,
+						VerifierFunction: func(shrinkVerifierWorker *FuzzerWorker, shrunkenCallSequence calls.CallSequence) (bool, error) {
+							shrunkSeqMethodId, shrunkSeqTestFailed, errVerify := t.checkAssertionFailures(shrunkenCallSequence)
+							if errVerify != nil {
+								return false, errVerify
+							}
+							return shrunkSeqTestFailed && methodId == *shrunkSeqMethodId, nil
+						},
+						FinishedCallback: func(finishedCallbackWorker *FuzzerWorker, shrunkenCallSequence calls.CallSequence, verbosity config.VerbosityLevel) error {
+							if len(shrunkenCallSequence) > 0 {
+								_, errCb := calls.ExecuteCallSequenceWithExecutionTracer(finishedCallbackWorker.chain, finishedCallbackWorker.fuzzer.contractDefinitions, shrunkenCallSequence, verbosity)
+								if errCb != nil {
+									return errCb
+								}
+							}
+							testCase.status = TestCaseStatusFailed
+							testCase.callSequence = &shrunkenCallSequence
+							finishedCallbackWorker.workerMetrics().failedSequences.Add(finishedCallbackWorker.workerMetrics().failedSequences, big.NewInt(1))
+							finishedCallbackWorker.Fuzzer().ReportTestCaseFinished(testCase)
+							return nil
+						},
+						RecordResultInCorpus: true,
+					}
+					// newShrinkRequests[workerIdx] = append(newShrinkRequests[workerIdx], shrinkRequest)
+					workers[0].pendingShrinkRequests = append(workers[0].pendingShrinkRequests, shrinkRequest)
+
+				}
+
+			}
+			*/
+			// general bugs including assertion failure, to be exported to json later
+			{
+				bug_id := rawPC<<16 | bugType<<8 | (bugContractId & 0xFF)
+				// fmt.Println("Bug Raw PC", rawPC, "Bug Type", bugType, "Bug Contract ID", bugContractId, "fuzzer target contract id", t.fuzzer.targetContractId)
+				if _, exists := t.generalBugs[bug_id]; exists {
+					continue
+				}
+				// Filter false positive for arbitrary call: skip if method has no dynamic bytes input
+				if bugType == CuEVM_ARBITRARY_CALL {
+					if hasBytesInput, ok := workers[workerIdx].sigHasBytesCache[lastCallMethod.Sig]; !ok || !hasBytesInput {
+						continue
+					}
+				}
+				if bugType == CuEVM_LEAKING_ETHER || bugType == CuEVM_REENTRANCY {
+
+					has_deployer_action := false
+					for i := 0; i < len(fullSequence); i++ {
+						method, err := fullSequence[i].Method()
+						if err != nil {
+							fmt.Println("CuEVM Debug: method error", err)
+							continue
+						}
+						methodSigStr := strings.ToLower(method.Sig)
+						if strings.HasPrefix(methodSigStr, "initialize") {
+							has_deployer_action = true
+							break
+						}
+						if fullSequence[i].Call.From == t.fuzzer.DeployerAddress() {
+							if strings.HasPrefix(methodSigStr, "change") || strings.HasPrefix(methodSigStr, "set") || strings.HasPrefix(methodSigStr, "init") {
+								has_deployer_action = true
+								// fmt.Println("CuEVM Debug: has_deployer_action", has_deployer_action)
+								break
+							}
+						}
+					}
+					if has_deployer_action {
+						// treat as false positive
+						continue
+					}
+				}
+				if bugContractId != t.fuzzer.targetContractId {
+					if bugType == CuEVM_INTEGER_ADD || bugType == CuEVM_INTEGER_SUB || bugType == CuEVM_INTEGER_MUL {
+						continue
+					}
+				}
+				// RegisterTestCase registers a new TestCase with the Fuzzer.
+				testCase := &AssertionTestCase{
+					status:          TestCaseStatusFailed,
+					targetContract:  lastCall.Contract,
+					targetMethod:    *lastCallMethod,
+					bugType:         bugType,
+					bugPC:           rawPC,
+					bugContractName: t.fuzzer.targetContractName,
+					callSequence:    &fullSequence,
+					bugTime:         time.Since(t.fuzzer.fuzzStartTime).Seconds(), // seconds
+				}
+
+				// Add all bugs to general bugs first, false positive filtering happens later
+				t.fuzzer.RegisterTestCase(testCase)
+				t.generalBugs[bug_id] = testCase
+				select {
+				case t.fuzzer.shrinkWorker.addSequenceCorpusChan <- AddSequenceCorpusRequest{
+					Sequence: fullSequence,
+					Weight:   bigIntWeightValue,
+				}:
+					// Successfully enqueued
+				default:
+					fmt.Println("addSequenceCorpusChan full, adding sequence directly to corpus")
+					_ = t.fuzzer.corpus.AddCallSequence(fullSequence, bigIntWeightValue)
+				}
+
+			}
+			// bugPCsProcessed[rawPC] = true
+		}
+
+	}
+
+	// CuEVM: disable shrink requests for debugging June 19
+	// for workerIdx := 0; workerIdx < len(workers); workerIdx++ {
+	// 	worker := workers[workerIdx]
+	// 	if len(newShrinkRequests[workerIdx]) > 0 {
+	// 		worker.pendingShrinkRequests = append(worker.pendingShrinkRequests, newShrinkRequests[workerIdx]...)
+
+	// 	}
+	// 	// fmt.Println("CuEVM Debug: workerIdx", workerIdx, "pendingShrinkRequests", len(worker.pendingShrinkRequests))
+	// }
+	// fmt.Println("CuEVM Debug: total_bugs_encountered", total_bugs_encountered)
+	return total_bugs_encountered > 0, nil
+}
+
+// getFalsePositivePCs gets false positive PCs for a contract's arithmetic bugs
+func (t *AssertionTestCaseProvider) getFalsePositivePCs(contractName string, bugs []bugInfo) map[uint32]bool {
+	fpPCs := make(map[uint32]bool)
+
+	if len(bugs) == 0 {
+		return fpPCs
+	}
+
+	// Helper to mark all bugs as false positives (conservative fallback)
+	allBugsAsFP := func() map[uint32]bool {
+		result := make(map[uint32]bool)
+		for _, bug := range bugs {
+			result[bug.pc] = true
+		}
+		return result
+	}
+
+	// Retrieve etherscan flag and target from platform config
+	var etherscanFlag bool
+	var target string
+	if platformConfig, err := t.fuzzer.config.Compilation.GetPlatformConfig(); err == nil {
+		if cryticConfig, ok := platformConfig.(*platforms.CryticCompilationConfig); ok {
+			etherscanFlag = cryticConfig.EtherscanJsonFile
+			target = cryticConfig.Target
+
+		}
+	}
+
+	// Determine source path based on etherscan flag
+	var sourcePath string
+	if etherscanFlag {
+		sourcePath = target
+	} else {
+		// Find source path for the contract
+		for _, contract := range t.fuzzer.ContractDefinitions() {
+
+			if contract.Name() == contractName {
+				sourcePath = contract.SourcePath()
+				break
+			}
+		}
+	}
+	// fmt.Println("CuEVM Debug: sourcePath", sourcePath)
+	if sourcePath == "" {
+		fmt.Println("CuEVM Debug: no source path found", contractName)
+		return allBugsAsFP()
+	}
+
+	// Find script path
+	executablePath, _ := os.Executable()
+
+	executableDir := filepath.Dir(executablePath)
+	scriptPath := filepath.Join(executableDir, "solidityutils", "filter_fp.py")
+
+	if _, err := os.Stat(scriptPath); os.IsNotExist(err) {
+		scriptPath = "solidityutils/filter_fp.py"
+		if _, err := os.Stat(scriptPath); os.IsNotExist(err) {
+			fmt.Println("CuEVM Debug: script not found", scriptPath)
+			return fpPCs
+		}
+	}
+
+	// Prepare command arguments
+	platformConfig, _ := t.fuzzer.config.Compilation.GetPlatformConfig()
+	cryticConfig, ok := platformConfig.(*platforms.CryticCompilationConfig)
+	if ok {
+		fmt.Println("Solc Version:", cryticConfig.SolcVersion)
+	} else {
+		fmt.Println("platformConfig is not of type CryticCompilationConfig")
+	}
+	args := []string{scriptPath, contractName, sourcePath, cryticConfig.SolcVersion}
+	for _, bug := range bugs {
+		args = append(args, fmt.Sprintf("%d:%d", bug.pc, bug.bugType))
+	}
+
+	// Execute Python script
+	cmd := exec.Command("python3", args...)
+	fmt.Println("CuEVM Debug: cmd", cmd)
+	output, err := cmd.Output()
+	fmt.Println("CuEVM Debug: output", string(output))
+	if err != nil {
+		fmt.Println("CuEVM Debug: error executing script", err)
+		return allBugsAsFP()
+	}
+
+	// Parse output - space-separated list of false positive PCs (get only last line of output)
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	outputStr := ""
+	if len(lines) > 0 {
+		outputStr = strings.TrimSpace(lines[len(lines)-1])
+	}
+	// fmt.Println("CuEVM Debug: outputStr", outputStr)
+	if outputStr == "" {
+		// fmt.Println("CuEVM Debug: no false positives found")
+		return fpPCs // No false positives
+	}
+
+	fpPCStrs := strings.Fields(outputStr)
+	for _, pcStr := range fpPCStrs {
+		var parsedPC uint32
+		if _, err := fmt.Sscanf(pcStr, "%d", &parsedPC); err == nil {
+			fpPCs[parsedPC] = true
+		}
+	}
+
+	return fpPCs
+}
+
+func (t *AssertionTestCaseProvider) getAllBugReported() []*AssertionTestCase {
+	// First, process false positives by batching arithmetic bugs by contract
+	t.processFalsePositives()
+
+	validBugs := make([]*AssertionTestCase, 0, len(t.generalBugs))
+	fpBugs := make([]*AssertionTestCase, 0, len(t.falsePositiveBugs))
+
+	// Separate valid bugs and false positives
+	for _, v := range t.generalBugs {
+		validBugs = append(validBugs, v)
+	}
+
+	for _, v := range t.falsePositiveBugs {
+		fpBugs = append(fpBugs, v)
+	}
+
+	fmt.Printf("CuEVM Debug: Found %d valid bugs and %d false positives:\n", len(validBugs), len(fpBugs))
+	for i, bug := range validBugs {
+		fmt.Printf("  CuEVM_BUG_REPORT %d: Contract=%s, Method=%s, Type=%d, PC=%d, Time=%f\n",
+			i, bug.bugContractName, bug.targetMethod.Name, bug.bugType, bug.bugPC, bug.bugTime)
+	}
+
+	if len(fpBugs) > 0 {
+		fmt.Printf("CuEVM Debug: False positives filtered:\n")
+		for i, bug := range fpBugs {
+			fmt.Printf("  CuEVM_FP %d: Contract=%s, Method=%s, Type=%d, PC=%d, Time=%f\n",
+				i, bug.bugContractName, bug.targetMethod.Name, bug.bugType, bug.bugPC, bug.bugTime)
+		}
+	}
+
+	return validBugs
+}
+
+// processFalsePositives batches arithmetic bugs by contract and filters false positives
+func (t *AssertionTestCaseProvider) processFalsePositives() {
+	// Group arithmetic bugs by contract with their types
+	contractBugs := make(map[string][]bugInfo)
+	bugIdMap := make(map[string]map[uint32]uint32) // contract -> pc -> bug_id
+
+	for bug_id, bug := range t.generalBugs {
+		if bug.bugType == CuEVM_INTEGER_BUG || bug.bugType == CuEVM_INTEGER_ADD || bug.bugType == CuEVM_INTEGER_SUB || bug.bugType == CuEVM_INTEGER_MUL {
+			contractName := bug.bugContractName
+			if contractBugs[contractName] == nil {
+				contractBugs[contractName] = []bugInfo{}
+				bugIdMap[contractName] = make(map[uint32]uint32)
+			}
+			contractBugs[contractName] = append(contractBugs[contractName], bugInfo{bug.bugPC, bug.bugType})
+			bugIdMap[contractName][bug.bugPC] = bug_id
+		}
+	}
+
+	// Process each contract's bugs in batch
+	for contractName, bugs := range contractBugs {
+		fpPCs := t.getFalsePositivePCs(contractName, bugs)
+		// fmt.Println("CuEVM Debug: fpPCs", fpPCs)
+		// Move false positive bugs to separate map
+		for pc := range fpPCs {
+			if bug_id, exists := bugIdMap[contractName][pc]; exists {
+				bug := t.generalBugs[bug_id]
+				delete(t.generalBugs, bug_id)
+				t.falsePositiveBugs[bug_id] = bug
+				fmt.Printf("CuEVM Debug: Filtered FP - Contract=%s, PC=%d\n", contractName, pc)
+			}
+		}
+	}
 }
 
 // encounteredAssertionFailure takes in a panic code and a config.AssertionModesConfig and will determine whether the

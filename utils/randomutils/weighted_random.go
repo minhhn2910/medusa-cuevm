@@ -5,7 +5,6 @@ import (
 	"math/big"
 	"math/rand"
 	"sync"
-	"time"
 	"unsafe"
 )
 
@@ -17,13 +16,27 @@ type WeightedRandomChoice[T any] struct {
 	// weight describes a value indicating the likelihood of this WeightedRandomChoice to appear in a random selection.
 	// Its probability is calculated as current weight / all weights in a WeightedRandomChooser.
 	weight *big.Int
+
+	// hitCount describes the number of times this WeightedRandomChoice has been selected.
+	hitCount uint64
+	uniqueId uint32
 }
 
 // NewWeightedRandomChoice creates a WeightedRandomChoice with the given underlying data and weight to use when added to a WeightedRandomChooser.
 func NewWeightedRandomChoice[T any](data T, weight *big.Int) *WeightedRandomChoice[T] {
 	return &WeightedRandomChoice[T]{
-		Data:   data,
-		weight: new(big.Int).Set(weight),
+		Data:     data,
+		weight:   new(big.Int).Set(weight),
+		uniqueId: 0, // Default uniqueId for compatibility
+	}
+}
+
+// NewWeightedRandomChoiceWithId creates a WeightedRandomChoice with the given underlying data, weight, and uniqueId.
+func NewWeightedRandomChoiceWithId[T any](data T, weight *big.Int, uniqueId uint32) *WeightedRandomChoice[T] {
+	return &WeightedRandomChoice[T]{
+		Data:     data,
+		weight:   new(big.Int).Set(weight),
+		uniqueId: uniqueId,
 	}
 }
 
@@ -37,6 +50,8 @@ type WeightedRandomChooser[T any] struct {
 	// recomputed.
 	totalWeight *big.Int
 
+	averageExecutionTime float64
+
 	// randomProvider offers a source of random data.
 	randomProvider *rand.Rand
 	// randomProviderLock is a lock to offer thread safety to the random number generator.
@@ -45,7 +60,8 @@ type WeightedRandomChooser[T any] struct {
 
 // NewWeightedRandomChooser creates a WeightedRandomChooser with a new random provider and mutex lock.
 func NewWeightedRandomChooser[T any]() *WeightedRandomChooser[T] {
-	return NewWeightedRandomChooserWithRand[T](rand.New(rand.NewSource(time.Now().Unix())), &sync.Mutex{})
+	// return NewWeightedRandomChooserWithRand[T](rand.New(rand.NewSource(time.Now().Unix())), &sync.Mutex{})
+	return NewWeightedRandomChooserWithRand[T](rand.New(rand.NewSource(1)), &sync.Mutex{})
 }
 
 // NewWeightedRandomChooserWithRand creates a WeightedRandomChooser with the provided random provider and mutex lock to be acquired when using it.
@@ -63,19 +79,70 @@ func (c *WeightedRandomChooser[T]) ChoiceCount() int {
 	return len(c.choices)
 }
 
+// add a function to print the choices
+func (c *WeightedRandomChooser[T]) PrintChoices() {
+	fmt.Println("Printing WeightedRandomChooser choices:")
+	for _, choice := range c.choices {
+		fmt.Printf("choice data: %v\n", choice.Data)
+		fmt.Printf("choice weight: %v\n", choice.weight)
+		fmt.Printf("choice uniqueId: %v\n", choice.uniqueId)
+		fmt.Println()
+	}
+}
+
+// RemoveChoiceByUniqueId removes a choice with the specified uniqueId from the chooser
+func (c *WeightedRandomChooser[T]) RemoveChoiceByUniqueId(uniqueId uint32) bool {
+	// Acquire our lock during the duration of this method.
+	c.randomProviderLock.Lock()
+	defer c.randomProviderLock.Unlock()
+
+	// Find and remove the choice with matching uniqueId
+	for i, choice := range c.choices {
+		if choice.uniqueId == uniqueId {
+			// Subtract the weight from total
+			c.totalWeight = new(big.Int).Sub(c.totalWeight, choice.weight)
+			// Remove the choice from slice
+			c.choices = append(c.choices[:i], c.choices[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
 // AddChoices adds weighted choices to the WeightedRandomChooser, allowing for future random selection.
 func (c *WeightedRandomChooser[T]) AddChoices(choices ...*WeightedRandomChoice[T]) {
+	// Acquire our lock during the duration of this method.
+	// c.randomProviderLock.Lock()
+	// defer c.randomProviderLock.Unlock()
+
+	// Loop for each choice to add to sum all weights
+	// for _, choice := range choices {
+	// 	c.totalWeight = new(big.Int).Add(c.totalWeight, choice.weight)
+	// }
+
+	// // Add to choices to our array
+	// c.choices = append(c.choices, choices...)
+	for _, choice := range choices {
+		// fmt.Println("Adding choice: ", choice.Data)
+		c.AddChoice(choice)
+	}
+}
+
+func (c *WeightedRandomChooser[T]) AddChoice(choice *WeightedRandomChoice[T]) {
 	// Acquire our lock during the duration of this method.
 	c.randomProviderLock.Lock()
 	defer c.randomProviderLock.Unlock()
 
 	// Loop for each choice to add to sum all weights
-	for _, choice := range choices {
-		c.totalWeight = new(big.Int).Add(c.totalWeight, choice.weight)
-	}
+	c.totalWeight = new(big.Int).Add(c.totalWeight, choice.weight)
+
+	// weight := INITIAL_WEIGHT // new choice never fuzzed
+	// // Ityfuzz  weight ~ 3
+
+	// choice.hitCount = 0
 
 	// Add to choices to our array
-	c.choices = append(c.choices, choices...)
+	c.choices = append(c.choices, choice)
 }
 
 // Choose selects a random weighted item from the WeightedRandomChooser, or returns an error if one occurs.

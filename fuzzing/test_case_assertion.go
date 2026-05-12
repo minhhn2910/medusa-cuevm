@@ -1,7 +1,9 @@
 package fuzzing
 
 import (
+	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/crytic/medusa/logging"
@@ -12,16 +14,60 @@ import (
 	fuzzerTypes "github.com/crytic/medusa/fuzzing/contracts"
 )
 
+const (
+	// 	#define BUG_INTEGER_BUG 0x01
+	// #define BUG_SELF_DESTRUCT 0x02
+	// #define BUG_LEAKING_ETHER 0x03
+	// #define BUG_ARBITRARY_CALL 0x04
+	// #define BUG_REENTRANCY 0x05
+	// #define BUG_INVALID_OPCODE 0xFF
+	CuEVM_ASSERTION_BUG_TYPE = 0xFF
+	CuEVM_INTEGER_BUG        = 0x01
+	CuEVM_SELF_DESTRUCT      = 0x02
+	CuEVM_LEAKING_ETHER      = 0x03
+	CuEVM_ARBITRARY_CALL     = 0x04
+	CuEVM_REENTRANCY         = 0x05
+	CuEVM_INTEGER_ADD        = 0x11
+	CuEVM_INTEGER_SUB        = 0x12
+	CuEVM_INTEGER_MUL        = 0x13
+)
+
+// bugTypeName returns a human-readable name for the bug type
+func bugTypeName(bugType uint32) string {
+	switch bugType {
+	case CuEVM_ASSERTION_BUG_TYPE:
+		return "Assertion Failure"
+	case CuEVM_INTEGER_BUG, CuEVM_INTEGER_ADD, CuEVM_INTEGER_SUB, CuEVM_INTEGER_MUL:
+		return "Integer Overflow"
+	case CuEVM_SELF_DESTRUCT:
+		return "Self Destruct"
+	case CuEVM_LEAKING_ETHER:
+		return "Leaking Ether"
+	case CuEVM_ARBITRARY_CALL:
+		return "Arbitrary Call"
+	case CuEVM_REENTRANCY:
+		return "Reentrancy"
+	default:
+		return "Assertion Failure"
+	}
+}
+
 // AssertionTestCase describes a test being run by a AssertionTestCaseProvider.
 type AssertionTestCase struct {
 	// status describes the status of the test case
-	status TestCaseStatus
+	status TestCaseStatus `json:"status"`
 	// targetContract describes the target contract where the test case was found
-	targetContract *fuzzerTypes.Contract
+	targetContract *fuzzerTypes.Contract `json:"-"`
 	// targetMethod describes the target method for the test case
-	targetMethod abi.Method
+	targetMethod abi.Method `json:"targetMethod"`
 	// callSequence describes the call sequence that broke the assertion
-	callSequence *calls.CallSequence
+	callSequence *calls.CallSequence `json:"callSequence"`
+	// bugPC describes the PC of the bug
+	bugPC uint32 `json:"bugPC"`
+	// bugType describes the type of the bug
+	bugType         uint32  `json:"bugType"`
+	bugContractName string  `json:"bugContractName"`
+	bugTime         float64 `json:"bugTime"`
 }
 
 // Status describes the TestCaseStatus used to define the current state of the test.
@@ -47,7 +93,8 @@ func (t *AssertionTestCase) LogMessage() *logging.LogBuffer {
 	buffer := logging.NewLogBuffer()
 	if t.Status() == TestCaseStatusFailed {
 		buffer.Append(colors.RedBold, fmt.Sprintf("[%s] ", t.Status()), colors.Bold, t.Name(), colors.Reset, "\n")
-		buffer.Append(fmt.Sprintf("Test for method \"%s.%s\" resulted in an assertion failure after the following call sequence:\n", t.targetContract.Name(), t.targetMethod.Sig))
+		buffer.Append(fmt.Sprintf("Test for method \"%s.%s\" resulted in an %s after the following call sequence:\n", t.targetContract.Name(), t.targetMethod.Sig, bugTypeName(t.bugType)))
+		buffer.Append(fmt.Sprintf("Bug PC: %d\n", t.bugPC))
 		buffer.Append(colors.Bold, "[Call Sequence]", colors.Reset, "\n")
 		buffer.Append(t.CallSequence().Log().Elements()...)
 		return buffer
@@ -65,5 +112,32 @@ func (t *AssertionTestCase) Message() string {
 
 // ID obtains a unique identifier for a test result.
 func (t *AssertionTestCase) ID() string {
-	return strings.Replace(fmt.Sprintf("ASSERTION-%s-%s", t.targetContract.Name(), t.targetMethod.Sig), "_", "-", -1)
+	if t.bugType != 0 {
+		return strings.Replace(fmt.Sprintf("GPU_BUG-%s-%s-%d-%d", t.targetContract.Name(), t.targetMethod.Sig, t.bugType, t.bugPC), "_", "-", -1)
+	} else {
+		return strings.Replace(fmt.Sprintf("Assertion-%s-%s", t.targetContract.Name(), t.targetMethod.Sig), "_", "-", -1)
+	}
+}
+
+// MarshalJSON provides custom JSON marshalling for the struct.
+func (t *AssertionTestCase) MarshalJSON() ([]byte, error) {
+	// Create a struct with exported fields for JSON marshaling
+	return json.Marshal(struct {
+		TargetMethod    string              `json:"method"`
+		CallSequence    *calls.CallSequence `json:"callSequence"`
+		BugPC           uint32              `json:"bugPC"`
+		BugType         string              `json:"bugType"`
+		BugContractName string              `json:"bugContractName"`
+		BugTime         string              `json:"bugTime"`
+		ID              string              `json:"id"`
+	}{
+
+		TargetMethod:    t.targetMethod.Sig,
+		CallSequence:    t.callSequence,
+		BugPC:           t.bugPC,
+		BugType:         bugTypeName(t.bugType),
+		BugContractName: t.bugContractName,
+		BugTime:         strconv.FormatFloat(t.bugTime, 'f', 2, 64),
+		ID:              t.ID(),
+	})
 }

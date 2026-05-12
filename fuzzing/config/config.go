@@ -34,8 +34,14 @@ type ProjectConfig struct {
 
 // FuzzingConfig describes the configuration options used by the fuzzing.Fuzzer.
 type FuzzingConfig struct {
-	// Workers describes the amount of threads to use in fuzzing campaigns.
+	// CpuWorkers describes the amount of CPU threads to use in fuzzing campaigns. Default to be $(nproc)
+	CpuWorkers int `json:"cpuWorkers"`
+
+	// Backward compatibility with medusa. Default to be the same as CpuWorkers
 	Workers int `json:"workers"`
+
+	// GpuWorkers describes the amount of GPU threads to use in fuzzing campaigns. Default to be 32768 (rounded )
+	GpuWorkers int `json:"gpuWorkers"`
 
 	// WorkerResetLimit describes how many call sequences a worker should test before it is destroyed and recreated
 	// so that memory from its underlying chain is freed.
@@ -62,6 +68,9 @@ type FuzzingConfig struct {
 	// CoverageEnabled describes whether to use coverage-guided fuzzing
 	CoverageEnabled bool `json:"coverageEnabled"`
 
+	// DeploymentCodeCoverageEnabled describes whether to use coverage-guided fuzzing for deployment code
+	DeploymentCodeCoverageEnabled bool `json:"deploymentCodeCoverageEnabled"`
+
 	// CoverageFormats indicate which reports to generate: "lcov" and "html" are supported.
 	CoverageFormats []string `json:"coverageFormats"`
 
@@ -82,6 +91,10 @@ type FuzzingConfig struct {
 	// ConstructorArgs holds the constructor arguments for TargetContracts deployments. It is available via the project
 	// configuration
 	ConstructorArgs map[string]map[string]any `json:"constructorArgs"`
+
+	// ConstructorArgsBytes holds the raw constructor arguments bytes for TargetContracts deployments as hex strings.
+	// This is tried before ConstructorArgs and before randomizing arguments.
+	ConstructorArgsBytes string `json:"constructorArgsBytes"`
 
 	// DeployerAddress describe the account address to be used to deploy contracts.
 	DeployerAddress string `json:"deployerAddress"`
@@ -406,8 +419,12 @@ func (p *ProjectConfig) Validate() error {
 	}
 
 	// Verify the worker count is a positive number.
-	if p.Fuzzing.Workers <= 0 {
+	if p.Fuzzing.CpuWorkers <= 0 {
 		return errors.New("project configuration must specify a positive number for the worker count")
+	}
+
+	if p.Fuzzing.GpuWorkers <= 0 {
+		return errors.New("project configuration must specify a positive number for the GPU worker count")
 	}
 
 	// Verify that the sequence length is a positive number

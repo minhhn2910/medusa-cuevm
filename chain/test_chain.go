@@ -3,8 +3,9 @@ package chain
 import (
 	"errors"
 	"fmt"
-	compilationTypes "github.com/crytic/medusa/compilation/types"
 	"math/big"
+
+	compilationTypes "github.com/crytic/medusa/compilation/types"
 
 	"github.com/crytic/medusa/chain/state"
 	"golang.org/x/net/context"
@@ -203,8 +204,9 @@ func newTestChainWithStateFactory(
 	// Create an in-memory database
 	db := rawdb.NewMemoryDatabase()
 	dbConfig := &triedb.Config{
-		HashDB: hashdb.Defaults,
-		// TODO	Add cleanCacheSize of 256 depending on the resolution of this issue https://github.com/crytic/medusa-geth/issues/30099
+		Preimages: true,
+		HashDB:    hashdb.Defaults,
+		// TODO	Add cleanCacheSize of 256 depending on the resolution of this issue https://github.com/ethereum/go-ethereum/issues/30099
 		// PathDB: pathdb.Defaults,
 	}
 	trieDB := triedb.NewDatabase(db, dbConfig)
